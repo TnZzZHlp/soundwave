@@ -1,0 +1,11 @@
+/target/
+**/target/
+.idea/
+.gradle/
+local.properties
+*.iml
+android/app/.cxx/
+android/app/build/
+android/app/src/main/jniLibs/
+*.wav
+*.pcm

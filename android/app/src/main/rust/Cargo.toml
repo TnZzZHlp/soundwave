@@ -1,0 +1,23 @@
+[package]
+name = "audio-stream-android"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "soundwave_native"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+arc-swap.workspace = true
+audio-stream-audio-common = { path = "../../../../../crates/audio-common" }
+audio-stream-protocol = { path = "../../../../../crates/protocol" }
+audio-stream-transport = { path = "../../../../../crates/transport" }
+crossbeam-queue.workspace = true
+bytes.workspace = true
+jni.workspace = true
+quinn.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true

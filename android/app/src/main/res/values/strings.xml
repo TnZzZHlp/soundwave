@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Audio Stream</string>
+    <string name="notification_channel_name">Audio streaming</string>
+</resources>

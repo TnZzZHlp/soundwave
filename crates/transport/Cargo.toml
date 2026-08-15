@@ -1,0 +1,16 @@
+[package]
+name = "audio-stream-transport"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+audio-stream-protocol = { path = "../protocol" }
+bytes.workspace = true
+quinn.workspace = true
+rcgen.workspace = true
+rustls.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
