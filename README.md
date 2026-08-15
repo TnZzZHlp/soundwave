@@ -56,7 +56,7 @@ QUIC always uses TLS. On its first launch, the Windows server creates a self-sig
 %LOCALAPPDATA%\Soundwave
 ```
 
-It prints the SHA-256 certificate fingerprint. Copy that fingerprint into the Android app with the server IP and port. Android pins the actual leaf certificate hash; it does not accept arbitrary certificates. The identity persists across server restarts, so the fingerprint stays stable unless that directory is removed or `--identity-dir` is changed.
+The server dashboard and **Server information** dialog show the SHA-256 certificate fingerprint. Android pins the actual leaf certificate hash; it does not accept arbitrary certificates. The identity persists across server restarts, so the fingerprint stays stable unless that directory is removed or `--identity-dir` is changed.
 
 Treat a changed fingerprint as a pairing change. Do not accept a fingerprint from an untrusted source.
 
@@ -78,6 +78,31 @@ Android app:
 - A physical `arm64-v8a` phone is the primary target; `x86_64` is included for an emulator
 
 Both devices must be on the same LAN. Enterprise/guest Wi-Fi networks with AP isolation will usually prevent the connection.
+
+## Build everything with Just
+
+Install the task runner once:
+
+```powershell
+cargo install just
+```
+
+From the repository root, build all Rust workspace crates and the Android debug APK with:
+
+```powershell
+just build
+```
+
+`build` runs the Android Gradle wrapper after the Rust workspace build, so the Android prerequisites above are required. The APK is written to `android\app\build\outputs\apk\debug\app-debug.apk`.
+
+Useful task shortcuts:
+
+```powershell
+just build-server   # Windows server only
+just build-android  # Android debug APK only
+just verify         # Rust format, check, test, and lint
+just                # List tasks
+```
 
 ## Build the Windows server
 
@@ -121,7 +146,15 @@ By default it listens at `0.0.0.0:48400`. To choose another bind address or iden
 audio-stream-server --bind 0.0.0.0:48400 --identity-dir C:\SoundwaveIdentity
 ```
 
-The startup output shows the default playback device, its mix format, the fixed capture format, server address, and pairing fingerprint. The server supports one streaming client at a time in V0.1. Press `Ctrl+C` to stop capture, close the connection, join workers, and release WASAPI.
+The normal server executable uses the Windows GUI subsystem, so launching it from Explorer opens no terminal window. Instead, **Soundwave Server** opens as a taskbar window and adds a notification-area icon. The dashboard shows a pairing QR code containing a reachable IPv4 LAN endpoint, the actual QUIC port, and the public SHA-256 certificate pin; it never contains the certificate private key or session credentials. **Server information** shows the same pairing endpoint and full fingerprint as a manual fallback. Closing the dashboard hides it while the server keeps running. Right-click the notification-area icon to restore the server window, disable or enable the service, open **Server information**, open **Settings**, or exit the server. Disabling the service keeps an existing phone connection alive but stops new PCM datagrams; after its existing small audio buffer drains, the phone plays silence until the service is enabled again.
+
+The server automatically chooses one suitable IPv4 LAN adapter for the QR code. If a VPN, virtual adapter, or multiple equally suitable adapters make the choice ambiguous, it leaves the QR code unavailable rather than pairing the phone with a potentially wrong address. Start the server with an explicit advertised address in that case:
+
+```powershell
+audio-stream-server --pairing-host 192.168.1.100
+```
+
+`--pairing-host` affects only the QR code; it does not change the QUIC listen socket. Use **Exit** in the dashboard or notification-area menu to stop a GUI-launched server.
 
 ## Build the Android app
 
@@ -152,10 +185,12 @@ gradle :app:assembleDebug
 
 ## Use the Android app
 
-1. Start the Windows server and copy its fingerprint.
-2. In **Audio Stream**, enter the Windows LAN IP, port `48400`, and fingerprint.
-3. Tap **Connect**.
+1. Start the Windows server and leave its pairing QR code visible.
+2. In **Audio Stream**, tap **Scan pairing QR** and scan the code. The app fills the host, port, and TLS fingerprint but does not connect automatically.
+3. Review the populated values, then tap **Connect**.
 4. Allow notification permission when Android asks.
+
+The scanner uses the Google Play services Code Scanner and does not request camera permission from Soundwave. On a device without available Google Play services or before the scanner module is downloaded, use the existing manual fields instead.
 
 The app starts a `mediaPlayback` foreground service before connecting and holds a Wi-Fi lock only while a live stream is active. The notification has a **Disconnect** action. Audio continues when the activity is destroyed, the app is switched away from, the screen is off, or the phone is locked. Disconnect stops the QUIC task, clears the ring, stops AudioTrack, releases the Wi-Fi lock, removes the foreground notification, and stops the service.
 
@@ -170,6 +205,8 @@ Allow inbound **UDP 48400** for `audio-stream-server.exe`. QUIC uses UDP; openin
 | Symptom | Check |
 | --- | --- |
 | Android cannot connect | Verify both devices are on the same subnet, Windows Firewall permits UDP 48400, and guest/AP isolation is disabled. |
+| Pairing QR is unavailable | Use the shown reason to choose a reachable IPv4 address, then restart with `--pairing-host <IPv4>`. |
+| QR scan cannot start | Confirm Google Play services is available and current on the phone, or enter the host, port, and fingerprint manually. |
 | Certificate error | Copy the current server fingerprint exactly. Delete neither the server identity directory nor the app’s saved pairing unintentionally. |
 | No sound | Run `--capture-to capture.pcm` and inspect the raw file. Verify Windows is playing through its default output device. |
 | Immediate disconnect | Confirm the Android app and server use the same protocol version and that the phone can reach the entered IP address. |

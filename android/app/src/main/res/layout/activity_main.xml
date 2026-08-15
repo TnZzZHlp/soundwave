@@ -52,6 +52,13 @@
             android:inputType="textVisiblePassword"
             android:singleLine="true" />
 
+        <Button
+            android:id="@+id/scanPairingQrButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="@string/scan_pairing_qr" />
+
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"

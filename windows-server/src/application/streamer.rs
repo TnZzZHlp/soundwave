@@ -12,7 +12,9 @@ use tracing::{info, warn};
 use crate::{
     audio::{capture::spawn_loopback_capture, device::default_render_device_info},
     config::{ServerArgs, default_identity_dir},
-    network::server::{self, FRAME_QUEUE_CAPACITY, StreamCounters},
+    network::server::{self, AudioTransmissionGate, FRAME_QUEUE_CAPACITY, StreamCounters},
+    pairing,
+    ui::{ServerUi, ServerUiInfo, ServerUiReporter},
 };
 
 pub async fn run(args: ServerArgs) -> anyhow::Result<()> {
@@ -26,6 +28,17 @@ pub async fn run(args: ServerArgs) -> anyhow::Result<()> {
         audio_stream_transport::load_or_create_server_config(&identity_dir)?;
     let endpoint = Endpoint::server(server_config, args.bind)
         .with_context(|| format!("could not bind QUIC UDP socket at {}", args.bind))?;
+    let endpoint_address = endpoint
+        .local_addr()
+        .context("could not determine the QUIC listening address")?;
+    let fingerprint = audio_stream_transport::format_fingerprint(&identity.sha256_fingerprint);
+    let pairing = pairing::resolve_pairing_info(
+        args.bind,
+        endpoint_address,
+        args.pairing_host,
+        identity.sha256_fingerprint,
+    )
+    .map_err(|error| error.to_string());
 
     println!(
         "Audio Stream Server\n\nDevice:\n{}\nMix format:\n{} Hz / {} channels / {} bit {}\nCapture format:\n48000 Hz / Stereo / i16\n\nServer:\n{}\n\nTLS certificate fingerprint (enter this in Android when connecting):\n{}\nIdentity directory:\n{}\n\nWaiting for Android client...",
@@ -34,18 +47,42 @@ pub async fn run(args: ServerArgs) -> anyhow::Result<()> {
         device.mix_channels,
         device.mix_bits_per_sample,
         device.mix_sample_type,
-        args.bind,
-        audio_stream_transport::format_fingerprint(&identity.sha256_fingerprint),
+        endpoint_address,
+        fingerprint,
         identity_dir.display(),
     );
 
     let shutdown = CancellationToken::new();
+    let transmission = AudioTransmissionGate::enabled();
     let signal_shutdown = shutdown.clone();
     tokio::spawn(async move {
         if tokio::signal::ctrl_c().await.is_ok() {
             signal_shutdown.cancel();
         }
     });
+
+    let ui = match ServerUi::spawn(
+        ServerUiInfo {
+            device_name: device.friendly_name.clone(),
+            mix_sample_rate: device.mix_sample_rate,
+            mix_channels: device.mix_channels,
+            mix_bits_per_sample: device.mix_bits_per_sample,
+            mix_sample_type: device.mix_sample_type.clone(),
+            bind: endpoint_address,
+            fingerprint,
+            identity_dir: identity_dir.clone(),
+            pairing,
+        },
+        shutdown.clone(),
+        transmission.clone(),
+    ) {
+        Ok(ui) => Some(ui),
+        Err(error) => {
+            warn!(%error, "could not start the Windows taskbar UI");
+            None
+        }
+    };
+    let ui_reporter = ui.as_ref().map(ServerUi::reporter);
 
     loop {
         let incoming = tokio::select! {
@@ -58,14 +95,27 @@ pub async fn run(args: ServerArgs) -> anyhow::Result<()> {
 
         match incoming.await {
             Ok(connection) => {
-                if let Err(error) = serve_client(connection, shutdown.clone()).await {
+                if let Err(error) = serve_client(
+                    connection,
+                    shutdown.clone(),
+                    ui_reporter.as_ref(),
+                    transmission.clone(),
+                )
+                .await
+                {
                     warn!(%error, "client session ended with an error");
+                }
+                if let Some(ui) = ui_reporter.as_ref() {
+                    ui.waiting_for_client();
                 }
             }
             Err(error) => warn!(%error, "incoming QUIC connection was rejected"),
         }
     }
 
+    if let Some(ui) = ui.as_ref() {
+        ui.shutdown();
+    }
     endpoint.close(VarInt::from_u32(0), b"server shutdown");
     endpoint.wait_idle().await;
     println!("Audio Stream Server stopped.");
@@ -75,6 +125,8 @@ pub async fn run(args: ServerArgs) -> anyhow::Result<()> {
 async fn serve_client(
     connection: Connection,
     server_shutdown: CancellationToken,
+    ui: Option<&ServerUiReporter>,
+    transmission: AudioTransmissionGate,
 ) -> anyhow::Result<()> {
     let peer = connection.remote_address();
     let session_stop = server_shutdown.child_token();
@@ -97,9 +149,13 @@ async fn serve_client(
         frame_duration_ms,
         session_stop.clone(),
         counters.clone(),
+        transmission,
     )
     .context("could not start QUIC packet thread")?;
 
+    if let Some(ui) = ui {
+        ui.streaming_to(peer);
+    }
     println!("\nClient connected:\n{peer}\n\nStreaming...");
     server::process_control_messages(
         &mut control_reader,

@@ -1,7 +1,7 @@
 use std::{
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -21,6 +21,35 @@ use tracing::{debug, warn};
 use crate::audio::PcmBlock;
 
 pub const FRAME_QUEUE_CAPACITY: usize = 8;
+
+/// Shared switch controlling whether captured PCM is sent to the connected client.
+///
+/// Disabling the switch keeps the QUIC control connection alive while the sender
+/// drains and discards capture blocks, preserving bounded latency for a later
+/// re-enable.
+#[derive(Clone)]
+pub struct AudioTransmissionGate {
+    enabled: Arc<AtomicBool>,
+}
+
+impl AudioTransmissionGate {
+    /// Creates a gate that allows audio transmission.
+    pub fn enabled() -> Self {
+        Self {
+            enabled: Arc::new(AtomicBool::new(true)),
+        }
+    }
+
+    /// Returns whether new PCM datagrams may be sent.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.load(Ordering::SeqCst)
+    }
+
+    /// Enables or disables new PCM datagram transmission.
+    pub fn set_enabled(&self, enabled: bool) {
+        self.enabled.store(enabled, Ordering::SeqCst);
+    }
+}
 
 #[derive(Default)]
 pub struct StreamCounters {
@@ -85,6 +114,7 @@ pub fn spawn_datagram_sender(
     frame_duration_ms: u8,
     stop: CancellationToken,
     counters: Arc<StreamCounters>,
+    transmission: AudioTransmissionGate,
 ) -> std::io::Result<std::thread::JoinHandle<Result<(), TransportError>>> {
     std::thread::Builder::new()
         .name("quic-audio-send".to_owned())
@@ -102,7 +132,7 @@ pub fn spawn_datagram_sender(
                     break Ok(());
                 }
                 match frames.recv_timeout(Duration::from_millis(100)) {
-                    Ok(block) => packetizer.send_block(&sender, block, &counters),
+                    Ok(block) => packetizer.send_block(&sender, block, &counters, &transmission),
                     Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
                     Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break Ok(()),
                 }?;
@@ -151,8 +181,16 @@ impl Packetizer {
         sender: &DatagramSender,
         block: PcmBlock,
         counters: &StreamCounters,
+        transmission: &AudioTransmissionGate,
     ) -> Result<(), TransportError> {
+        if !transmission.is_enabled() {
+            return Ok(());
+        }
+
         for (index, samples) in block.samples.chunks(self.samples_per_packet).enumerate() {
+            if !transmission.is_enabled() {
+                return Ok(());
+            }
             let mut payload = Vec::with_capacity(std::mem::size_of_val(samples));
             for sample in samples {
                 payload.extend_from_slice(&sample.to_le_bytes());
@@ -216,6 +254,19 @@ pub async fn process_control_messages(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audio_transmission_gate_is_shared_between_clones() {
+        let gate = AudioTransmissionGate::enabled();
+        let worker_gate = gate.clone();
+        assert!(worker_gate.is_enabled());
+
+        gate.set_enabled(false);
+        assert!(!worker_gate.is_enabled());
+
+        worker_gate.set_enabled(true);
+        assert!(gate.is_enabled());
+    }
 
     #[test]
     fn datagram_size_selects_safe_packet_duration() {

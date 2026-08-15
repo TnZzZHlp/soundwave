@@ -1,4 +1,8 @@
-use std::{env, net::SocketAddr, path::PathBuf};
+use std::{
+    env,
+    net::{Ipv4Addr, SocketAddr},
+    path::PathBuf,
+};
 
 use clap::Parser;
 
@@ -16,6 +20,10 @@ pub struct ServerArgs {
     /// Directory containing the persistent self-signed server certificate and key.
     #[arg(long, value_name = "DIRECTORY")]
     pub identity_dir: Option<PathBuf>,
+
+    /// IPv4 address advertised in the pairing QR code without changing the listen socket.
+    #[arg(long, value_name = "IPv4")]
+    pub pairing_host: Option<Ipv4Addr>,
 
     /// Debug mode: capture WASAPI loopback into this raw PCM file instead of serving a client.
     #[arg(long, value_name = "FILE")]

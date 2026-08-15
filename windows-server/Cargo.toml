@@ -21,4 +21,6 @@ tracing-subscriber.workspace = true
 thiserror.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+qrcodegen.workspace = true
 wasapi = "0.16.0"
+windows.workspace = true

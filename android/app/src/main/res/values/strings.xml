@@ -1,4 +1,8 @@
 <resources>
     <string name="app_name">Audio Stream</string>
     <string name="notification_channel_name">Audio streaming</string>
+    <string name="scan_pairing_qr">Scan pairing QR</string>
+    <string name="pairing_qr_invalid">That code is not a valid Soundwave pairing QR code</string>
+    <string name="pairing_qr_filled">Pairing information filled in. Review it, then tap Connect.</string>
+    <string name="pairing_qr_scanner_unavailable">QR scanner unavailable: %1$s</string>
 </resources>

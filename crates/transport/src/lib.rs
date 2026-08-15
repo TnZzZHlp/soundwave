@@ -4,6 +4,7 @@ mod config;
 mod control;
 mod datagram;
 mod error;
+mod pairing;
 
 pub use config::{
     CertificateIdentity, certificate_fingerprint, format_fingerprint, load_or_create_server_config,
@@ -12,6 +13,7 @@ pub use config::{
 pub use control::{ControlReader, ControlWriter, MAX_CONTROL_MESSAGE_BYTES};
 pub use datagram::{DatagramReceiver, DatagramSender};
 pub use error::TransportError;
+pub use pairing::{PAIRING_URI_AUTHORITY, PAIRING_URI_PATH, PAIRING_URI_SCHEME, PairingUri};
 
 #[cfg(test)]
 mod tests {
