@@ -21,9 +21,10 @@ pub struct CertificateIdentity {
     pub sha256_fingerprint: [u8; 32],
 }
 
-/// Creates a fresh self-signed certificate. The server normally calls
-/// [`load_or_create_server_config`] so the fingerprint persists across restarts;
-/// this constructor is useful for tests and ephemeral deployments.
+/// Creates a fresh self-signed certificate for tests and ephemeral deployments.
+///
+/// The server normally calls [`load_or_create_server_config`] so the
+/// fingerprint persists across restarts.
 pub fn make_server_config() -> Result<(ServerConfig, CertificateIdentity), TransportError> {
     let certified = rcgen::generate_simple_self_signed(vec!["soundwave.local".to_owned()])
         .map_err(|error| TransportError::Certificate(error.to_string()))?;
@@ -38,7 +39,7 @@ pub fn load_or_create_server_config(
     identity_dir: impl AsRef<Path>,
 ) -> Result<(ServerConfig, CertificateIdentity), TransportError> {
     let identity_dir = identity_dir.as_ref();
-    fs::create_dir_all(identity_dir).map_err(identity_io_error)?;
+    fs::create_dir_all(identity_dir).map_err(|error| identity_io_error(&error))?;
     let certificate_path = identity_file(identity_dir, "server-cert.der");
     let private_key_path = identity_file(identity_dir, "server-key.der");
     match (fs::read(&certificate_path), fs::read(&private_key_path)) {
@@ -51,8 +52,10 @@ pub fn load_or_create_server_config(
                 .map_err(|error| TransportError::Certificate(error.to_string()))?;
             let certificate = certified.cert.der().to_vec();
             let private_key = certified.key_pair.serialize_der();
-            fs::write(&certificate_path, &certificate).map_err(identity_io_error)?;
-            fs::write(&private_key_path, &private_key).map_err(identity_io_error)?;
+            fs::write(&certificate_path, &certificate)
+                .map_err(|error| identity_io_error(&error))?;
+            fs::write(&private_key_path, &private_key)
+                .map_err(|error| identity_io_error(&error))?;
             server_config_from_der(certificate, private_key)
         }
         (certificate_result, private_key_result) => Err(TransportError::Certificate(format!(
@@ -85,7 +88,7 @@ fn identity_file(identity_dir: &Path, name: &str) -> PathBuf {
     identity_dir.join(name)
 }
 
-fn identity_io_error(error: std::io::Error) -> TransportError {
+fn identity_io_error(error: &std::io::Error) -> TransportError {
     TransportError::Certificate(format!("server identity I/O error: {error}"))
 }
 
@@ -139,9 +142,10 @@ pub fn parse_fingerprint(input: &str) -> Result<[u8; 32], TransportError> {
     Ok(fingerprint)
 }
 
-/// Builds a QUIC configuration that accepts exactly one server certificate by
-/// SHA-256 fingerprint. Unlike an insecure "accept any certificate" verifier,
-/// this makes a LAN MITM fail before control or audio data are exchanged.
+/// Builds a QUIC configuration pinned to one SHA-256 server certificate.
+///
+/// Unlike an insecure "accept any certificate" verifier, this makes a LAN
+/// MITM fail before control or audio data are exchanged.
 pub fn make_pinned_client_config(fingerprint: [u8; 32]) -> Result<ClientConfig, TransportError> {
     let verifier = Arc::new(FingerprintVerifier {
         expected: fingerprint,
@@ -216,7 +220,7 @@ impl ServerCertVerifier for FingerprintVerifier {
     }
 }
 
-fn hex_nibble(byte: u8) -> Option<u8> {
+const fn hex_nibble(byte: u8) -> Option<u8> {
     match byte {
         b'0'..=b'9' => Some(byte - b'0'),
         b'a'..=b'f' => Some(byte - b'a' + 10),

@@ -59,13 +59,14 @@ pub fn initialize() -> Result<(), ClientError> {
             session: None,
         });
     }
+    drop(slot);
     Ok(())
 }
 
-pub fn connect(host: String, port: u16, fingerprint_text: String) -> Result<(), ClientError> {
+pub fn connect(host: &str, port: u16, fingerprint_text: &str) -> Result<(), ClientError> {
     initialize()?;
     let address: SocketAddr = format!("{host}:{port}").parse()?;
-    let fingerprint = audio_stream_transport::parse_fingerprint(&fingerprint_text)?;
+    let fingerprint = audio_stream_transport::parse_fingerprint(fingerprint_text)?;
 
     let mut slot = engine_slot()
         .lock()
@@ -91,6 +92,7 @@ pub fn connect(host: String, port: u16, fingerprint_text: String) -> Result<(), 
         stop.clone(),
     ));
     engine.session = Some(Session { stop, task, ring });
+    drop(slot);
     Ok(())
 }
 
@@ -148,19 +150,19 @@ pub fn last_error() -> String {
 }
 
 pub fn received_packets() -> u64 {
-    with_state(|state| state.received_packets())
+    with_state(super::state::SharedState::received_packets)
 }
 
 pub fn lost_packets() -> u64 {
-    with_state(|state| state.lost_packets())
+    with_state(super::state::SharedState::lost_packets)
 }
 
 pub fn late_packets() -> u64 {
-    with_state(|state| state.late_packets())
+    with_state(super::state::SharedState::late_packets)
 }
 
 pub fn invalid_packets() -> u64 {
-    with_state(|state| state.invalid_packets())
+    with_state(super::state::SharedState::invalid_packets)
 }
 
 pub fn underruns() -> u64 {
@@ -175,7 +177,7 @@ pub fn overwritten_samples() -> u64 {
 
 pub fn buffer_duration_ms() -> u64 {
     ACTIVE_RING.load_full().map_or(0, |ring| {
-        ring.available_samples() as u64 * 1_000 / (SAMPLE_RATE as u64 * CHANNELS as u64)
+        ring.available_samples() as u64 * 1_000 / (u64::from(SAMPLE_RATE) * u64::from(CHANNELS))
     })
 }
 
@@ -184,6 +186,12 @@ pub fn estimated_latency_ms() -> u64 {
     // This is deliberately an estimate, not a claim about speaker output time.
     // The 50 ms term is the target jitter delay before samples enter the ring.
     rtt_half + buffer_duration_ms() + 50
+}
+
+/// Maps an unsigned counter to the Java `long` return type, saturating
+/// instead of wrapping for the impossible overflow case.
+fn to_jlong(value: u64) -> jlong {
+    i64::try_from(value).unwrap_or(i64::MAX)
 }
 
 fn with_state(callback: impl FnOnce(&SharedState) -> u64) -> u64 {
@@ -224,12 +232,11 @@ pub extern "system" fn Java_com_example_audiostream_NativeBridge_nativeConnect<'
         .with_env(|env| -> jni::errors::Result<jboolean> {
             let host = host.mutf8_chars(env)?.to_str().into_owned();
             let fingerprint = fingerprint.mutf8_chars(env)?.to_str().into_owned();
-            let result = if (1..=u16::MAX as jint).contains(&port) {
-                connect(host, port as u16, fingerprint)
-            } else {
-                Err(ClientError::Runtime(
+            let result = match u16::try_from(port) {
+                Ok(port) if (1..=u16::MAX).contains(&port) => connect(&host, port, &fingerprint),
+                Ok(_) | Err(_) => Err(ClientError::Runtime(
                     "port must be between 1 and 65535".to_owned(),
-                ))
+                )),
             };
             if let Err(error) = result {
                 record_connect_error(&error);
@@ -283,7 +290,7 @@ pub extern "system" fn Java_com_example_audiostream_NativeBridge_nativeGetLatenc
     _class: JClass<'local>,
 ) -> jlong {
     unowned_env
-        .with_env(|_| -> jni::errors::Result<jlong> { Ok(estimated_latency_ms() as jlong) })
+        .with_env(|_| -> jni::errors::Result<jlong> { Ok(to_jlong(estimated_latency_ms())) })
         .resolve::<ThrowRuntimeExAndDefault>()
 }
 
@@ -293,7 +300,7 @@ pub extern "system" fn Java_com_example_audiostream_NativeBridge_nativeGetBuffer
     _class: JClass<'local>,
 ) -> jlong {
     unowned_env
-        .with_env(|_| -> jni::errors::Result<jlong> { Ok(buffer_duration_ms() as jlong) })
+        .with_env(|_| -> jni::errors::Result<jlong> { Ok(to_jlong(buffer_duration_ms())) })
         .resolve::<ThrowRuntimeExAndDefault>()
 }
 
@@ -305,7 +312,7 @@ pub extern "system" fn Java_com_example_audiostream_NativeBridge_nativeGetReceiv
     _class: JClass<'local>,
 ) -> jlong {
     unowned_env
-        .with_env(|_| -> jni::errors::Result<jlong> { Ok(received_packets() as jlong) })
+        .with_env(|_| -> jni::errors::Result<jlong> { Ok(to_jlong(received_packets())) })
         .resolve::<ThrowRuntimeExAndDefault>()
 }
 
@@ -315,7 +322,7 @@ pub extern "system" fn Java_com_example_audiostream_NativeBridge_nativeGetLostPa
     _class: JClass<'local>,
 ) -> jlong {
     unowned_env
-        .with_env(|_| -> jni::errors::Result<jlong> { Ok(lost_packets() as jlong) })
+        .with_env(|_| -> jni::errors::Result<jlong> { Ok(to_jlong(lost_packets())) })
         .resolve::<ThrowRuntimeExAndDefault>()
 }
 
@@ -325,7 +332,7 @@ pub extern "system" fn Java_com_example_audiostream_NativeBridge_nativeGetLatePa
     _class: JClass<'local>,
 ) -> jlong {
     unowned_env
-        .with_env(|_| -> jni::errors::Result<jlong> { Ok(late_packets() as jlong) })
+        .with_env(|_| -> jni::errors::Result<jlong> { Ok(to_jlong(late_packets())) })
         .resolve::<ThrowRuntimeExAndDefault>()
 }
 
@@ -335,7 +342,7 @@ pub extern "system" fn Java_com_example_audiostream_NativeBridge_nativeGetUnderr
     _class: JClass<'local>,
 ) -> jlong {
     unowned_env
-        .with_env(|_| -> jni::errors::Result<jlong> { Ok(underruns() as jlong) })
+        .with_env(|_| -> jni::errors::Result<jlong> { Ok(to_jlong(underruns())) })
         .resolve::<ThrowRuntimeExAndDefault>()
 }
 
@@ -345,7 +352,7 @@ pub extern "system" fn Java_com_example_audiostream_NativeBridge_nativeGetInvali
     _class: JClass<'local>,
 ) -> jlong {
     unowned_env
-        .with_env(|_| -> jni::errors::Result<jlong> { Ok(invalid_packets() as jlong) })
+        .with_env(|_| -> jni::errors::Result<jlong> { Ok(to_jlong(invalid_packets())) })
         .resolve::<ThrowRuntimeExAndDefault>()
 }
 
@@ -357,7 +364,7 @@ pub extern "system" fn Java_com_example_audiostream_NativeBridge_nativeGetOverwr
     _class: JClass<'local>,
 ) -> jlong {
     unowned_env
-        .with_env(|_| -> jni::errors::Result<jlong> { Ok(overwritten_samples() as jlong) })
+        .with_env(|_| -> jni::errors::Result<jlong> { Ok(to_jlong(overwritten_samples())) })
         .resolve::<ThrowRuntimeExAndDefault>()
 }
 
@@ -383,7 +390,8 @@ pub extern "system" fn Java_com_example_audiostream_NativeBridge_nativeReadPcm<'
             // thread and never accesses it concurrently. We only fill it from
             // the lock-free PCM ring and make no JNI calls while it is borrowed.
             let mut elements = unsafe { output.get_elements(env, ReleaseMode::CopyBack)? };
-            Ok(read_pcm(&mut elements) as jint)
+            let samples = jint::try_from(read_pcm(&mut elements)).unwrap_or(jint::MAX);
+            Ok(samples)
         })
         .resolve::<ThrowRuntimeExAndDefault>()
 }

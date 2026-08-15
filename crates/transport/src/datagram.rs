@@ -30,7 +30,7 @@ impl DatagramSender {
 
     /// Sends one packet. A full QUIC send buffer is treated as a transient loss,
     /// not a reason to queue old real-time audio.
-    pub fn send(&self, packet: AudioPacket) -> Result<(), TransportError> {
+    pub fn send(&self, packet: &AudioPacket) -> Result<(), TransportError> {
         let encoded = packet.encode();
         let allowed = self
             .connection

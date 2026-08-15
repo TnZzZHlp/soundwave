@@ -162,7 +162,7 @@ impl Packetizer {
             let packet = AudioPacket::new(self.sequence, timestamp, Bytes::from(payload));
             self.sequence = self.sequence.wrapping_add(1);
 
-            match sender.send(packet) {
+            match sender.send(&packet) {
                 Ok(()) => {
                     counters.packets_sent.fetch_add(1, Ordering::Relaxed);
                 }

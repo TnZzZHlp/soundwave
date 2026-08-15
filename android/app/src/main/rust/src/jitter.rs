@@ -50,11 +50,11 @@ impl JitterBuffer {
         self.drain_ready()
     }
 
-    pub fn lost_packets(&self) -> u64 {
+    pub const fn lost_packets(&self) -> u64 {
         self.lost_packets
     }
 
-    pub fn late_packets(&self) -> u64 {
+    pub const fn late_packets(&self) -> u64 {
         self.late_packets
     }
 
@@ -100,12 +100,14 @@ impl JitterBuffer {
     }
 }
 
-fn sequence_is_before(sequence: u32, reference: u32) -> bool {
-    sequence != reference && (sequence.wrapping_sub(reference) as i32) < 0
+const fn sequence_is_before(sequence: u32, reference: u32) -> bool {
+    let distance = sequence.wrapping_sub(reference);
+    distance != 0 && distance >= (1_u32 << 31)
 }
 
-fn sequence_is_after(sequence: u32, reference: u32) -> bool {
-    sequence != reference && (sequence.wrapping_sub(reference) as i32) > 0
+const fn sequence_is_after(sequence: u32, reference: u32) -> bool {
+    let distance = sequence.wrapping_sub(reference);
+    distance != 0 && distance < (1_u32 << 31)
 }
 
 #[cfg(test)]
@@ -117,7 +119,7 @@ mod tests {
     fn packet(sequence: u32) -> AudioPacket {
         AudioPacket {
             sequence,
-            timestamp: sequence as u64 * 480,
+            timestamp: u64::from(sequence) * 480,
             payload: Bytes::from_static(&[0, 0]),
         }
     }

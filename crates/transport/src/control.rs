@@ -18,7 +18,7 @@ pub struct ControlReader {
 }
 
 impl ControlWriter {
-    pub fn new(stream: SendStream) -> Self {
+    pub const fn new(stream: SendStream) -> Self {
         Self { stream }
     }
 
@@ -26,14 +26,19 @@ impl ControlWriter {
         let encoded = message
             .encode()
             .map_err(|error| TransportError::Quinn(error.to_string()))?;
-        if encoded.len() > MAX_CONTROL_MESSAGE_BYTES || encoded.len() > u16::MAX as usize {
+        if encoded.len() > MAX_CONTROL_MESSAGE_BYTES {
             return Err(TransportError::ControlMessageTooLarge {
                 actual: encoded.len(),
                 maximum: MAX_CONTROL_MESSAGE_BYTES,
             });
         }
+        let length =
+            u16::try_from(encoded.len()).map_err(|_| TransportError::ControlMessageTooLarge {
+                actual: encoded.len(),
+                maximum: MAX_CONTROL_MESSAGE_BYTES,
+            })?;
         self.stream
-            .write_all(&(encoded.len() as u16).to_be_bytes())
+            .write_all(&length.to_be_bytes())
             .await
             .map_err(|error| TransportError::Quinn(error.to_string()))?;
         self.stream
@@ -54,7 +59,7 @@ impl ControlWriter {
 }
 
 impl ControlReader {
-    pub fn new(stream: RecvStream) -> Self {
+    pub const fn new(stream: RecvStream) -> Self {
         Self { stream }
     }
 

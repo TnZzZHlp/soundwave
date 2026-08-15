@@ -1,10 +1,13 @@
 /// Converts a normalized float sample to signed 16-bit PCM with clipping.
 pub fn f32_to_i16(sample: f32) -> i16 {
     let clamped = sample.clamp(-1.0, 1.0);
+    // The cast cannot truncate: clamping keeps the scaled value within
+    // [-32768.0, 32767.0] before rounding, which is exactly i16's range.
+    #[allow(clippy::cast_possible_truncation)]
     if clamped >= 0.0 {
-        (clamped * i16::MAX as f32).round() as i16
+        (clamped * f32::from(i16::MAX)).round() as i16
     } else {
-        (clamped * -(i16::MIN as f32)).round() as i16
+        (clamped * -f32::from(i16::MIN)).round() as i16
     }
 }
 

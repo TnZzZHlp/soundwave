@@ -58,7 +58,7 @@ mod tests {
 
             let sender = DatagramSender::new(connection).unwrap();
             sender
-                .send(AudioPacket::new(7, 480, vec![0x34, 0x12, 0x78, 0x56]))
+                .send(&AudioPacket::new(7, 480, vec![0x34, 0x12, 0x78, 0x56]))
                 .unwrap();
             assert_eq!(reader.receive().await.unwrap(), ControlMessage::Stop);
             drop(send);

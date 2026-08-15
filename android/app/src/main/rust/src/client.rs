@@ -37,7 +37,7 @@ pub async fn run_session(
     if stop.is_cancelled() {
         state.set(ClientState::Disconnected);
     } else if let Err(error) = result {
-        state.set_error(error);
+        state.set_error(&error);
     } else {
         state.set(ClientState::Disconnected);
     }
@@ -59,7 +59,7 @@ async fn run_session_inner(
         })?;
     let connection = tokio::select! {
         connection = connecting => connection.map_err(|error| ClientError::Runtime(error.to_string()))?,
-        _ = stop.cancelled() => return Ok(()),
+        () = stop.cancelled() => return Ok(()),
     };
 
     let result = connected_loop(&connection, ring, state, stop.clone()).await;
@@ -99,7 +99,7 @@ async fn connected_loop(
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
-            _ = stop.cancelled() => return Ok(()),
+            () = stop.cancelled() => return Ok(()),
             _ = connection.closed() => return Ok(()),
             packet = datagrams.receive() => pipeline.handle_packet(packet?),
             message = reader.receive() => {
@@ -107,7 +107,8 @@ async fn connected_loop(
                     ControlMessage::Stop => return Ok(()),
                     ControlMessage::Ping { timestamp } => writer.send(&ControlMessage::Pong { timestamp }).await?,
                     ControlMessage::Pong { timestamp } => {
-                        let now_ms = started.elapsed().as_millis() as u64;
+                        let now_ms =
+                            u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
                         if now_ms >= timestamp {
                             state.set_rtt_ms(now_ms - timestamp);
                         }
@@ -116,7 +117,9 @@ async fn connected_loop(
                 }
             }
             _ = heartbeat.tick() => {
-                writer.send(&ControlMessage::Ping { timestamp: started.elapsed().as_millis() as u64 }).await?;
+                let timestamp =
+                    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                writer.send(&ControlMessage::Ping { timestamp }).await?;
             }
         }
     }
@@ -204,9 +207,9 @@ mod tests {
             let payload = vec![0_u8; 960];
             for sequence in 0..20 {
                 sender
-                    .send(audio_stream_protocol::AudioPacket::new(
+                    .send(&audio_stream_protocol::AudioPacket::new(
                         sequence,
-                        sequence as u64 * 240,
+                        u64::from(sequence) * 240,
                         payload.clone(),
                     ))
                     .unwrap();

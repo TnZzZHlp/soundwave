@@ -14,7 +14,7 @@ pub enum ClientState {
 }
 
 impl ClientState {
-    pub fn from_raw(value: i32) -> Self {
+    pub const fn from_raw(value: i32) -> Self {
         match value {
             1 => Self::Connecting,
             2 => Self::Connected,
@@ -73,7 +73,7 @@ impl SharedState {
         ClientState::from_raw(self.state.load(Ordering::Acquire))
     }
 
-    pub fn set_error(&self, error: impl ToString) {
+    pub fn set_error(&self, error: &impl ToString) {
         if let Ok(mut last_error) = self.last_error.lock() {
             *last_error = error.to_string();
         }
@@ -81,10 +81,10 @@ impl SharedState {
     }
 
     pub fn last_error(&self) -> String {
-        self.last_error
-            .lock()
-            .map(|error| error.clone())
-            .unwrap_or_else(|_| "native state lock was poisoned".to_owned())
+        self.last_error.lock().map_or_else(
+            |_| "native state lock was poisoned".to_owned(),
+            |error| error.clone(),
+        )
     }
 
     pub fn received_packets(&self) -> u64 {

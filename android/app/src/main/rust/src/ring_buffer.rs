@@ -9,7 +9,7 @@ use audio_stream_audio_common::{CHANNELS, SAMPLE_RATE};
 pub const PCM_RING_CAPACITY_SAMPLES: usize = SAMPLE_RATE as usize * CHANNELS as usize / 5;
 
 /// A lock-free bounded PCM ring. Its public methods only need `&self`, so the
-/// network producer and Kotlin's AudioTrack writer never contend on a mutex.
+/// network producer and Kotlin's `AudioTrack` writer never contend on a mutex.
 pub struct PcmRingBuffer {
     queue: ArrayQueue<i16>,
     underruns: AtomicU64,
