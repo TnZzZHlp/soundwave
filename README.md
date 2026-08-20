@@ -192,7 +192,7 @@ gradle :app:assembleDebug
 
 The scanner uses the Google Play services Code Scanner and does not request camera permission from Soundwave. On a device without available Google Play services or before the scanner module is downloaded, use the existing manual fields instead.
 
-The app starts a `mediaPlayback` foreground service before connecting and holds a Wi-Fi lock only while a live stream is active. The notification has a **Disconnect** action. Audio continues when the activity is destroyed, the app is switched away from, the screen is off, or the phone is locked. Disconnect stops the QUIC task, clears the ring, stops AudioTrack, releases the Wi-Fi lock, removes the foreground notification, and stops the service.
+The app starts a `mediaPlayback` foreground service before connecting and holds a Wi-Fi lock only while a live stream is active. The notification has a **Disconnect** action. Audio continues when the activity is destroyed, the app is switched away from, the screen is off, or the phone is locked. Disconnect stops the QUIC task, clears the ring, stops AudioTrack, releases the Wi-Fi lock, removes the foreground notification, and stops the service. If the stream ends for any other reason (server shutdown, network drop, handshake failure), the client reconnects automatically with an exponential backoff from 1 s to 10 s, retrying indefinitely until the server returns or the user disconnects; the playback thread keeps running and outputs silence while retrying.
 
 The UI shows a conservative estimated latency, current buffer duration, and packet/loss/late/underrun counters. The latency number is an estimate (`RTT / 2 + jitter/ring buffering`), not a claim of exact speaker-output latency.
 
@@ -216,4 +216,4 @@ Allow inbound **UDP 48400** for `audio-stream-server.exe`. QUIC uses UDP; openin
 
 ## Current V0.1 boundaries
 
-This project intentionally does not yet provide Opus, mDNS discovery, auto-reconnect, device selection, multiple clients, iOS/Linux/macOS support, public-Internet traversal, or accounts. PCM transport remains codec-neutral at the QUIC packet layer so an Opus encoder/decoder can be introduced later without replacing the control or datagram transport.
+This project intentionally does not yet provide Opus, mDNS discovery, device selection, multiple clients, iOS/Linux/macOS support, public-Internet traversal, or accounts. PCM transport remains codec-neutral at the QUIC packet layer so an Opus encoder/decoder can be introduced later without replacing the control or datagram transport.

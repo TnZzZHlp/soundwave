@@ -41,13 +41,15 @@ class AudioService : Service() {
             val text = when (state) {
                 NativeBridge.STATE_CONNECTING -> "Connecting to $currentServer"
                 NativeBridge.STATE_CONNECTED -> "Connected to $currentServer"
-                NativeBridge.STATE_ERROR -> "Connection error — open the app"
+                NativeBridge.STATE_ERROR -> "Connection lost — retrying"
                 NativeBridge.STATE_DISCONNECTED -> "Disconnected"
                 else -> "Preparing audio stream"
             }
             getSystemService(NotificationManager::class.java)
                 .notify(NotificationHelper.NOTIFICATION_ID, NotificationHelper.build(this@AudioService, text))
-            if (state == NativeBridge.STATE_ERROR || state == NativeBridge.STATE_DISCONNECTED) {
+            // ERROR is transient now: the native session retries automatically,
+            // so only a user-initiated disconnect stops playback and the lock.
+            if (state == NativeBridge.STATE_DISCONNECTED) {
                 stopPlayback()
                 releaseWifiLock()
             }

@@ -20,7 +20,9 @@ use tracing::{debug, warn};
 
 use crate::audio::PcmBlock;
 
-pub const FRAME_QUEUE_CAPACITY: usize = 8;
+/// 160 ms of frames: absorbs transient QUIC sender stalls so a stalled
+/// sender thread discards the oldest block instead of every new block.
+pub const FRAME_QUEUE_CAPACITY: usize = 16;
 
 /// Shared switch controlling whether captured PCM is sent to the connected client.
 ///
@@ -200,16 +202,25 @@ impl Packetizer {
             let packet = AudioPacket::new(self.sequence, timestamp, Bytes::from(payload));
             self.sequence = self.sequence.wrapping_add(1);
 
-            match sender.send(&packet) {
-                Ok(()) => {
-                    counters.packets_sent.fetch_add(1, Ordering::Relaxed);
+            // Every packet is sent twice back-to-back. WiFi drops datagrams
+            // independently and the client jitter buffer already deduplicates
+            // by sequence, so redundancy heals isolated loss at no latency
+            // cost. Only if both copies fail is the packet counted as dropped.
+            let mut sent_any = false;
+            for _ in 0..2 {
+                match sender.send(&packet) {
+                    Ok(()) => sent_any = true,
+                    // A full local QUIC datagram queue is treated as loss. It
+                    // is preferable to lose this old frame than to buffer it
+                    // and grow latency.
+                    Err(TransportError::Quinn(_)) => {}
+                    Err(error) => return Err(error),
                 }
-                // A full local QUIC datagram queue is treated as loss. It is
-                // preferable to lose this old frame than to buffer it and grow latency.
-                Err(TransportError::Quinn(_)) => {
-                    counters.packets_dropped.fetch_add(1, Ordering::Relaxed);
-                }
-                Err(error) => return Err(error),
+            }
+            if sent_any {
+                counters.packets_sent.fetch_add(1, Ordering::Relaxed);
+            } else {
+                counters.packets_dropped.fetch_add(1, Ordering::Relaxed);
             }
         }
         Ok(())

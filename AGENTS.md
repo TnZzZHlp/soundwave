@@ -2,7 +2,7 @@
 
 ## Project overview
 
-Soundwave streams the Windows default output device (WASAPI loopback) as PCM to one Android phone over LAN QUIC. V0.1 scope: no cloud, no accounts, no codec (Opus is planned later), no mDNS, no auto-reconnect, one client at a time. See README.md for the full design rationale.
+Soundwave streams the Windows default output device (WASAPI loopback) as PCM to one Android phone over LAN QUIC. V0.1 scope: no cloud, no accounts, no codec (Opus is planned later), no mDNS, one client at a time. After a drop, the client reconnects automatically with exponential backoff until the server returns or the user disconnects. See README.md for the full design rationale.
 
 Data flow: WASAPI loopback -> shared-mode conversion -> f32 -> i16 PCM -> bounded 10 ms capture queue -> QUIC datagrams; Android client -> jitter buffer -> SPSC PCM ring -> Kotlin AudioTrack.
 

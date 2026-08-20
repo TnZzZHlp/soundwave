@@ -18,6 +18,15 @@ use crate::{
     state::{ClientState, SharedState},
 };
 
+/// Delay before the first reconnection attempt after a session ends.
+const RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
+/// Upper bound for the exponential backoff between reconnection attempts.
+const RETRY_MAX_DELAY: Duration = Duration::from_secs(10);
+
+/// Runs one QUIC session and, unless [`stop`](CancellationToken) was
+/// cancelled (which only a user-initiated disconnect does), retries forever
+/// with an exponential backoff so a restarting server or recovering network
+/// is picked up without a manual reconnect.
 pub async fn run_session(
     address: SocketAddr,
     fingerprint: [u8; 32],
@@ -25,22 +34,48 @@ pub async fn run_session(
     state: Arc<SharedState>,
     stop: CancellationToken,
 ) {
-    let result = run_session_inner(
-        address,
-        fingerprint,
-        ring.clone(),
-        state.clone(),
-        stop.clone(),
-    )
-    .await;
-    ring.clear();
-    if stop.is_cancelled() {
-        state.set(ClientState::Disconnected);
-    } else if let Err(error) = result {
-        state.set_error(&error);
-    } else {
-        state.set(ClientState::Disconnected);
+    let mut retry_attempt = 0_u32;
+    loop {
+        let result = run_session_inner(
+            address,
+            fingerprint,
+            ring.clone(),
+            state.clone(),
+            stop.clone(),
+        )
+        .await;
+        ring.clear();
+        if stop.is_cancelled() {
+            state.set(ClientState::Disconnected);
+            return;
+        }
+        // A session that ended cleanly means the server was reachable moments
+        // ago; restart the backoff so a briefly offline server is caught fast.
+        match result {
+            Ok(()) => retry_attempt = 0,
+            Err(error) => state.set_error(&error),
+        }
+        // Cancellation during the wait exits immediately instead of after the
+        // full backoff delay.
+        tokio::select! {
+            () = stop.cancelled() => {
+                state.set(ClientState::Disconnected);
+                return;
+            }
+            () = tokio::time::sleep(retry_delay(retry_attempt)) => {}
+        }
+        retry_attempt = retry_attempt.saturating_add(1);
+        state.set(ClientState::Connecting);
     }
+}
+
+/// Exponential backoff starting at 1 s, doubling per failed attempt, capped
+/// at 10 s.
+fn retry_delay(attempt: u32) -> Duration {
+    RETRY_INITIAL_DELAY
+        .checked_mul(1_u32 << attempt.min(4))
+        .unwrap_or(RETRY_MAX_DELAY)
+        .min(RETRY_MAX_DELAY)
 }
 
 async fn run_session_inner(
@@ -167,6 +202,17 @@ mod tests {
 
     use super::*;
     use crate::ring_buffer::PCM_RING_CAPACITY_SAMPLES;
+
+    #[test]
+    fn retry_delay_backs_off_and_caps_at_max() {
+        assert_eq!(retry_delay(0), Duration::from_secs(1));
+        assert_eq!(retry_delay(1), Duration::from_secs(2));
+        assert_eq!(retry_delay(2), Duration::from_secs(4));
+        assert_eq!(retry_delay(3), Duration::from_secs(8));
+        assert_eq!(retry_delay(4), Duration::from_secs(10));
+        assert_eq!(retry_delay(5), Duration::from_secs(10));
+        assert_eq!(retry_delay(u32::MAX), Duration::from_secs(10));
+    }
 
     #[tokio::test]
     async fn native_client_receives_pinned_quic_audio() {

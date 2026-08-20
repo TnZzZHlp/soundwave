@@ -40,9 +40,16 @@ impl JitterBuffer {
 
     pub fn push(&mut self, packet: AudioPacket) -> Vec<JitterOutput> {
         let expected = self.expected_sequence.get_or_insert(packet.sequence);
-        if sequence_is_before(packet.sequence, *expected)
-            || self.packets.contains_key(&packet.sequence)
-        {
+        if self.packets.contains_key(&packet.sequence) {
+            // Redundant network copies arrive while the original is still
+            // buffered. Ignore them silently so duplicate transmission does
+            // not corrupt the late-packet diagnostic counter.
+            return Vec::new();
+        }
+        if sequence_is_before(packet.sequence, *expected) {
+            // A copy arriving after playback passed this sequence is either a
+            // genuinely reordered packet or the tail of a redundancy pair;
+            // either way it is too late to play.
             self.late_packets = self.late_packets.saturating_add(1);
             return Vec::new();
         }
@@ -132,6 +139,17 @@ mod tests {
                 JitterOutput::Silence => 0,
             })
             .collect()
+    }
+
+    #[test]
+    fn duplicate_copy_while_buffered_is_ignored() {
+        let mut jitter = JitterBuffer::new(2, 480);
+        let _ = jitter.push(packet(1));
+        let _ = jitter.push(packet(1)); // redundant copy, still buffered
+        assert_eq!(jitter.late_packets(), 0);
+        assert_eq!(sequences(jitter.push(packet(2))), vec![1, 2]);
+        assert_eq!(jitter.late_packets(), 0);
+        assert_eq!(jitter.lost_packets(), 0);
     }
 
     #[test]
