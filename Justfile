@@ -1,11 +1,10 @@
 # Soundwave build and verification tasks.
 # Install Just with: cargo install just
 
-# List available tasks.
-default:
-    @just --list
+# Build the release Windows server and Android APK by default.
+default: build-server build-android
 
-# Build all Rust workspace crates and the Android debug APK.
+# Build all Rust workspace crates and the Android release APK.
 build: build-workspace build-android
 
 # Build all Rust workspace crates for the current host.
@@ -16,14 +15,14 @@ build-workspace:
 build-server:
     cargo build --release -p audio-stream-server
 
-# Build the Android debug APK and its native Rust libraries.
+# Build the signed Android release APK and its native Rust libraries.
 [windows]
 build-android:
-    cd android && .\gradlew.bat :app:assembleDebug
+    cd android && .\gradlew.bat :app:assembleRelease
 
 [unix]
 build-android:
-    cd android && ./gradlew :app:assembleDebug
+    cd android && ./gradlew :app:assembleRelease
 
 # Check all Rust workspace targets and features.
 check:

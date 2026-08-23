@@ -6,6 +6,7 @@ local.properties
 *.iml
 android/app/.cxx/
 android/app/build/
+android/app/local-release.keystore
 android/app/src/main/jniLibs/
 *.wav
 *.pcm

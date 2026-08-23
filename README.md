@@ -87,21 +87,23 @@ Install the task runner once:
 cargo install just
 ```
 
-From the repository root, build all Rust workspace crates and the Android debug APK with:
+From the repository root, build the release Windows server and signed Android APK with:
 
 ```powershell
-just build
+just
 ```
 
-`build` runs the Android Gradle wrapper after the Rust workspace build, so the Android prerequisites above are required. The APK is written to `android\app\build\outputs\apk\debug\app-debug.apk`.
+`just` runs the Android Gradle wrapper after the Rust workspace build, so the Android prerequisites above are required. The APK is written to `android\app\build\outputs\apk\release\app-release.apk`. On the first build, Gradle creates a reusable local signing key at `android\app\local-release.keystore`.
 
 Useful task shortcuts:
 
 ```powershell
-just build-server   # Windows server only
-just build-android  # Android debug APK only
-just verify         # Rust format, check, test, and lint
-just                # List tasks
+just                 # Release Windows server and Android APK
+just build           # All release workspace crates and Android APK
+just build-server    # Release Windows server only
+just build-android   # Signed Android release APK only
+just verify          # Rust format, check, test, and lint
+just --list          # List tasks
 ```
 
 ## Build the Windows server
@@ -175,12 +177,12 @@ audio-stream-server --pairing-host 192.168.1.100
 
    It packages `libsoundwave_native.so` for the selected ABIs before the APK is assembled.
 
-4. Install the debug APK on the phone.
+4. Install the signed release APK on the phone.
 
 The Gradle configuration uses API 36, min SDK 26, and Java 17. If you use a command-line Gradle installation instead of Android Studio, run this from `android/`:
 
 ```powershell
-gradle :app:assembleDebug
+gradle :app:assembleRelease
 ```
 
 ## Use the Android app

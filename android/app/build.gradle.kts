@@ -3,6 +3,31 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+val localReleaseKeystore = file("local-release.keystore")
+val keytool = file(
+    "${System.getProperty("java.home")}/bin/keytool" +
+        if (System.getProperty("os.name").startsWith("Windows")) ".exe" else "",
+)
+val generateLocalReleaseKeystore by tasks.registering(Exec::class) {
+    description = "Generates a reusable local signing key for release APKs."
+    onlyIf { !localReleaseKeystore.exists() }
+    outputs.file(localReleaseKeystore)
+    commandLine(
+        keytool,
+        "-genkeypair",
+        "-keystore", localReleaseKeystore,
+        "-storetype", "PKCS12",
+        "-storepass", "soundwave",
+        "-alias", "soundwave",
+        "-keypass", "soundwave",
+        "-keyalg", "RSA",
+        "-keysize", "2048",
+        "-validity", "10000",
+        "-dname", "CN=Soundwave Local Release, OU=Development, O=Soundwave, C=US",
+        "-noprompt",
+    )
+}
+
 dependencies {
     implementation("com.google.android.gms:play-services-code-scanner:16.1.0")
 }
@@ -24,8 +49,18 @@ android {
         }
     }
 
+    signingConfigs {
+        create("release") {
+            storeFile = localReleaseKeystore
+            storePassword = "soundwave"
+            keyAlias = "soundwave"
+            keyPassword = "soundwave"
+        }
+    }
+
     buildTypes {
         release {
+            signingConfig = signingConfigs.getByName("release")
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
@@ -62,5 +97,5 @@ val buildRustNative by tasks.registering(Exec::class) {
 }
 
 tasks.named("preBuild").configure {
-    dependsOn(buildRustNative)
+    dependsOn(buildRustNative, generateLocalReleaseKeystore)
 }
