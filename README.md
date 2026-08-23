@@ -93,7 +93,7 @@ From the repository root, build the release Windows server and signed Android AP
 just
 ```
 
-`just` runs the Android Gradle wrapper after the Rust workspace build, so the Android prerequisites above are required. The APK is written to `android\app\build\outputs\apk\release\app-release.apk`. On the first build, Gradle creates a reusable local signing key at `android\app\local-release.keystore`.
+`just` runs the Android Gradle wrapper after the release Windows-server build, so the Android prerequisites above are required. The APK is written to `android\app\build\outputs\apk\release\app-release.apk`. On the first build, Gradle creates a reusable local signing key at `android\app\local-release.keystore`.
 
 Useful task shortcuts:
 
@@ -114,7 +114,7 @@ From the repository root:
 cargo build --release -p audio-stream-server
 ```
 
-The executable is `target\release\audio-stream-server.exe`.
+The executable is `target\release\audio-stream-server.exe`. On Unix hosts, `just build-server` cross-compiles `target/x86_64-pc-windows-gnu/release/audio-stream-server.exe`; it requires the `x86_64-pc-windows-gnu` Rust target and MinGW-w64 linker.
 
 Useful development checks:
 

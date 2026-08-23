@@ -12,8 +12,13 @@ build-workspace:
     cargo build --release --workspace
 
 # Build the Windows server only.
+[windows]
 build-server:
     cargo build --release -p audio-stream-server
+
+[unix]
+build-server:
+    cargo build --release --target x86_64-pc-windows-gnu -p audio-stream-server
 
 # Build the signed Android release APK and its native Rust libraries.
 [windows]
