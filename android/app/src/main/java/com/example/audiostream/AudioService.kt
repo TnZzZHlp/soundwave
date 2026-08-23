@@ -30,8 +30,9 @@ class AudioService : Service() {
 
     @Volatile private var playbackRunning = false
     @Volatile private var audioTrack: AudioTrack? = null
-    private var audioThread: Thread? = null
+    @Volatile private var audioThread: Thread? = null
     private var wifiLock: WifiManager.WifiLock? = null
+    private var reconnectRequested = false
     private var currentServer = ""
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -47,13 +48,10 @@ class AudioService : Service() {
             }
             getSystemService(NotificationManager::class.java)
                 .notify(NotificationHelper.NOTIFICATION_ID, NotificationHelper.build(this@AudioService, text))
-            // ERROR is transient now: the native session retries automatically,
-            // so only a user-initiated disconnect stops playback and the lock.
-            if (state == NativeBridge.STATE_DISCONNECTED) {
-                stopPlayback()
-                releaseWifiLock()
-            }
-            if (playbackRunning || state == NativeBridge.STATE_CONNECTING || state == NativeBridge.STATE_CONNECTED) {
+            syncStreamingResources(state)
+            // ponytail: polling adds up to one second before resources change;
+            // add a JNI callback only if faster recovery is required.
+            if (reconnectRequested) {
                 mainHandler.postDelayed(this, 1_000)
             }
         }
@@ -81,6 +79,7 @@ class AudioService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        reconnectRequested = false
         mainHandler.removeCallbacks(statusUpdater)
         stopPlayback()
         releaseWifiLock()
@@ -100,18 +99,19 @@ class AudioService : Service() {
             return
         }
 
+        reconnectRequested = true
         currentServer = "$host:$port"
         startForeground(
             NotificationHelper.NOTIFICATION_ID,
             NotificationHelper.build(this, "Connecting to $currentServer"),
         )
-        acquireWifiLock()
-        startPlayback()
+        syncStreamingResources(NativeBridge.nativeGetState())
         mainHandler.removeCallbacks(statusUpdater)
         mainHandler.post(statusUpdater)
     }
 
     private fun disconnectAndStop() {
+        reconnectRequested = false
         mainHandler.removeCallbacks(statusUpdater)
         NativeBridge.nativeDisconnect()
         stopPlayback()
@@ -120,8 +120,20 @@ class AudioService : Service() {
         stopSelf()
     }
 
+    private fun syncStreamingResources(state: Int) {
+        if (reconnectRequested && state == NativeBridge.STATE_CONNECTED) {
+            acquireWifiLock()
+            startPlayback()
+        } else {
+            stopPlayback()
+            releaseWifiLock()
+        }
+    }
+
     private fun startPlayback() {
-        if (playbackRunning) return
+        // Keep ownership until the old worker releases its track, so a fast
+        // reconnect cannot restart a worker that was asked to stop.
+        if (audioTrack != null) return
         val minBufferBytes = AudioTrack.getMinBufferSize(
             SAMPLE_RATE,
             AudioFormat.CHANNEL_OUT_STEREO,
@@ -148,12 +160,12 @@ class AudioService : Service() {
 
         playbackRunning = true
         audioTrack = track
-        audioThread = Thread({
+        val thread = Thread({
             Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
             val output = ShortArray(bufferBytes / 2)
             try {
                 track.play()
-                while (playbackRunning) {
+                while (playbackRunning && audioTrack === track) {
                     NativeBridge.nativeReadPcm(output)
                     val written = track.write(output, 0, output.size, AudioTrack.WRITE_BLOCKING)
                     if (written < 0) {
@@ -165,23 +177,30 @@ class AudioService : Service() {
                 runCatching { track.pause() }
                 runCatching { track.flush() }
                 track.release()
-                if (audioTrack === track) audioTrack = null
+                if (audioTrack === track) {
+                    playbackRunning = false
+                    audioTrack = null
+                }
+                if (audioThread === Thread.currentThread()) audioThread = null
             }
-        }, "SoundwaveAudioTrack").apply { start() }
+        }, "SoundwaveAudioTrack")
+        audioThread = thread
+        thread.start()
     }
 
     private fun stopPlayback() {
+        if (!playbackRunning) return
         playbackRunning = false
         audioTrack?.let { track ->
             runCatching { track.pause() }
             runCatching { track.flush() }
         }
         audioThread?.interrupt()
-        audioThread = null
     }
 
     @Suppress("DEPRECATION")
     private fun acquireWifiLock() {
+        if (wifiLock?.isHeld == true) return
         releaseWifiLock()
         val manager = applicationContext.getSystemService(WIFI_SERVICE) as? WifiManager ?: return
         wifiLock = manager.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "Soundwave:streaming").apply {

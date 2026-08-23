@@ -52,7 +52,12 @@ pub async fn run_session(
         // A session that ended cleanly means the server was reachable moments
         // ago; restart the backoff so a briefly offline server is caught fast.
         match result {
-            Ok(()) => retry_attempt = 0,
+            Ok(()) => {
+                retry_attempt = 0;
+                // A remote close is still a reconnecting state. Publish it before
+                // the backoff so Android can release live-playback resources.
+                state.set(ClientState::Connecting);
+            }
             Err(error) => state.set_error(&error),
         }
         // Cancellation during the wait exits immediately instead of after the
@@ -215,10 +220,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_client_receives_pinned_quic_audio() {
+    async fn native_client_receives_audio_and_retries_after_remote_close() {
         let (server_config, identity) = make_server_config().unwrap();
         let server = Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap()).unwrap();
         let server_address = server.local_addr().unwrap();
+        let (close_server, wait_for_close) = tokio::sync::oneshot::channel();
 
         let server_task = tokio::spawn(async move {
             let incoming = server.accept().await.unwrap();
@@ -260,6 +266,8 @@ mod tests {
                     ))
                     .unwrap();
             }
+            wait_for_close.await.unwrap();
+            connection.close(VarInt::from_u32(0), b"test server stopped");
             connection.closed().await;
         });
 
@@ -284,6 +292,15 @@ mod tests {
         .expect("client should receive test datagrams");
         assert_eq!(state.state(), ClientState::Connected);
         assert!(ring.available_samples() >= 9_600);
+
+        close_server.send(()).unwrap();
+        tokio::time::timeout(Duration::from_millis(500), async {
+            while state.state() != ClientState::Connecting {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("client should enter reconnecting state after server closes");
 
         stop.cancel();
         client_task.await.unwrap();

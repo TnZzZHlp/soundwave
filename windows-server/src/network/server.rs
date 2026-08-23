@@ -202,25 +202,17 @@ impl Packetizer {
             let packet = AudioPacket::new(self.sequence, timestamp, Bytes::from(payload));
             self.sequence = self.sequence.wrapping_add(1);
 
-            // Every packet is sent twice back-to-back. WiFi drops datagrams
-            // independently and the client jitter buffer already deduplicates
-            // by sequence, so redundancy heals isolated loss at no latency
-            // cost. Only if both copies fail is the packet counted as dropped.
-            let mut sent_any = false;
-            for _ in 0..2 {
-                match sender.send(&packet) {
-                    Ok(()) => sent_any = true,
-                    // A full local QUIC datagram queue is treated as loss. It
-                    // is preferable to lose this old frame than to buffer it
-                    // and grow latency.
-                    Err(TransportError::Quinn(_)) => {}
-                    Err(error) => return Err(error),
+            match sender.send(&packet) {
+                Ok(()) => {
+                    counters.packets_sent.fetch_add(1, Ordering::Relaxed);
                 }
-            }
-            if sent_any {
-                counters.packets_sent.fetch_add(1, Ordering::Relaxed);
-            } else {
-                counters.packets_dropped.fetch_add(1, Ordering::Relaxed);
+                // A full local QUIC datagram queue is treated as loss. It is
+                // preferable to lose this old frame than to buffer it and grow
+                // latency.
+                Err(TransportError::Quinn(_)) => {
+                    counters.packets_dropped.fetch_add(1, Ordering::Relaxed);
+                }
+                Err(error) => return Err(error),
             }
         }
         Ok(())
