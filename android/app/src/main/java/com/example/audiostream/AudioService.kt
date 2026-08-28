@@ -49,10 +49,10 @@ class AudioService : Service() {
             getSystemService(NotificationManager::class.java)
                 .notify(NotificationHelper.NOTIFICATION_ID, NotificationHelper.build(this@AudioService, text))
             syncStreamingResources(state)
-            // ponytail: polling adds up to one second before resources change;
-            // add a JNI callback only if faster recovery is required.
+            // Keep the pre-playback ring from filling while the native session
+            // finishes connecting; a callback is unnecessary for this small delay.
             if (reconnectRequested) {
-                mainHandler.postDelayed(this, 1_000)
+                mainHandler.postDelayed(this, 100)
             }
         }
     }
