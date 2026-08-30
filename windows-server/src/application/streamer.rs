@@ -1,6 +1,6 @@
 use std::sync::{
     Arc,
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicI32, AtomicU64, Ordering},
 };
 
 use anyhow::Context;
@@ -26,6 +26,7 @@ pub async fn run(args: ServerArgs) -> anyhow::Result<()> {
         .unwrap_or_else(default_identity_dir);
     let (server_config, identity) =
         audio_stream_transport::load_or_create_server_config(&identity_dir)?;
+    let volume_adjustment = Arc::new(AtomicI32::new(0));
     let endpoint = Endpoint::server(server_config, args.bind)
         .with_context(|| format!("could not bind QUIC UDP socket at {}", args.bind))?;
     let endpoint_address = endpoint
@@ -75,6 +76,7 @@ pub async fn run(args: ServerArgs) -> anyhow::Result<()> {
         },
         shutdown.clone(),
         transmission.clone(),
+        volume_adjustment.clone(),
     ) {
         Ok(ui) => Some(ui),
         Err(error) => {
@@ -100,6 +102,7 @@ pub async fn run(args: ServerArgs) -> anyhow::Result<()> {
                     shutdown.clone(),
                     ui_reporter.as_ref(),
                     transmission.clone(),
+                    volume_adjustment.clone(),
                 )
                 .await
                 {
@@ -127,9 +130,11 @@ async fn serve_client(
     server_shutdown: CancellationToken,
     ui: Option<&ServerUiReporter>,
     transmission: AudioTransmissionGate,
+    volume_adjustment: Arc<AtomicI32>,
 ) -> anyhow::Result<()> {
     let peer = connection.remote_address();
     let session_stop = server_shutdown.child_token();
+    volume_adjustment.store(0, Ordering::Release);
     let (mut control_writer, mut control_reader, frame_duration_ms) =
         server::perform_handshake(&connection, &session_stop).await?;
 
@@ -162,6 +167,7 @@ async fn serve_client(
         &mut control_writer,
         &connection,
         &session_stop,
+        volume_adjustment,
     )
     .await;
 

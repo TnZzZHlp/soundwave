@@ -3,6 +3,8 @@ use std::sync::{
     atomic::{AtomicI32, AtomicU64, Ordering},
 };
 
+const MAX_PENDING_VOLUME_STEPS: i32 = 100;
+
 #[repr(i32)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ClientState {
@@ -35,6 +37,8 @@ pub struct SharedState {
     late_packets: AtomicU64,
     invalid_packets: AtomicU64,
     rtt_ms: AtomicU64,
+    jitter_buffer_ms: AtomicU64,
+    volume_adjustment: AtomicI32,
     last_error: Mutex<String>,
 }
 
@@ -47,6 +51,8 @@ impl Default for SharedState {
             late_packets: AtomicU64::new(0),
             invalid_packets: AtomicU64::new(0),
             rtt_ms: AtomicU64::new(0),
+            jitter_buffer_ms: AtomicU64::new(0),
+            volume_adjustment: AtomicI32::new(0),
             last_error: Mutex::new(String::new()),
         }
     }
@@ -59,6 +65,8 @@ impl SharedState {
         self.late_packets.store(0, Ordering::Relaxed);
         self.invalid_packets.store(0, Ordering::Relaxed);
         self.rtt_ms.store(0, Ordering::Relaxed);
+        self.jitter_buffer_ms.store(0, Ordering::Relaxed);
+        self.volume_adjustment.store(0, Ordering::Relaxed);
         if let Ok(mut error) = self.last_error.lock() {
             error.clear();
         }
@@ -107,6 +115,10 @@ impl SharedState {
         self.rtt_ms.load(Ordering::Relaxed)
     }
 
+    pub fn jitter_buffer_ms(&self) -> u64 {
+        self.jitter_buffer_ms.load(Ordering::Relaxed)
+    }
+
     pub fn add_received(&self) {
         self.received_packets.fetch_add(1, Ordering::Relaxed);
     }
@@ -125,5 +137,25 @@ impl SharedState {
 
     pub fn set_rtt_ms(&self, value: u64) {
         self.rtt_ms.store(value, Ordering::Relaxed);
+    }
+
+    pub fn set_jitter_buffer_ms(&self, value: u64) {
+        self.jitter_buffer_ms.store(value, Ordering::Relaxed);
+    }
+
+    pub fn add_volume_adjustment(&self, steps: i8) {
+        let _ =
+            self.volume_adjustment
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                    Some(
+                        current
+                            .saturating_add(i32::from(steps))
+                            .clamp(-MAX_PENDING_VOLUME_STEPS, MAX_PENDING_VOLUME_STEPS),
+                    )
+                });
+    }
+
+    pub fn take_volume_adjustment(&self) -> i32 {
+        self.volume_adjustment.swap(0, Ordering::Relaxed)
     }
 }

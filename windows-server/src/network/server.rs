@@ -1,7 +1,7 @@
 use std::{
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -20,9 +20,9 @@ use tracing::{debug, warn};
 
 use crate::audio::PcmBlock;
 
-/// 160 ms of frames: absorbs transient QUIC sender stalls so a stalled
-/// sender thread discards the oldest block instead of every new block.
-pub const FRAME_QUEUE_CAPACITY: usize = 16;
+/// One 10 ms frame keeps a transient sender stall from turning into audible
+/// queueing delay; capture evicts it before enqueueing newer audio.
+pub const FRAME_QUEUE_CAPACITY: usize = 1;
 
 /// Shared switch controlling whether captured PCM is sent to the connected client.
 ///
@@ -134,10 +134,15 @@ pub fn spawn_datagram_sender(
                     break Ok(());
                 }
                 match frames.recv_timeout(Duration::from_millis(100)) {
-                    Ok(block) => packetizer.send_block(&sender, block, &counters, &transmission),
+                    Ok(block) => {
+                        match packetizer.send_block(&sender, block, &counters, &transmission) {
+                            Ok(()) => {}
+                            Err(error) => break Err(error),
+                        }
+                    }
                     Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
                     Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break Ok(()),
-                }?;
+                }
             };
             if result.is_err() {
                 stop.cancel();
@@ -165,16 +170,28 @@ pub fn choose_packet_duration_ms(max_payload_bytes: usize) -> anyhow::Result<u8>
     )
 }
 
+const FOUR_MS_PACKET_SAMPLES: usize = samples_per_packet(4);
+const FOUR_MS_TAIL_SAMPLES: usize = PcmBlock::SAMPLE_COUNT % FOUR_MS_PACKET_SAMPLES;
+
 struct Packetizer {
     sequence: u32,
+    frame_duration_ms: u8,
     samples_per_packet: usize,
+    pending_tail: Option<PendingTail>,
+}
+
+struct PendingTail {
+    timestamp: u64,
+    samples: [i16; FOUR_MS_TAIL_SAMPLES],
 }
 
 impl Packetizer {
     fn new(frame_duration_ms: u8) -> Self {
         Self {
             sequence: 0,
+            frame_duration_ms,
             samples_per_packet: samples_per_packet(frame_duration_ms),
+            pending_tail: None,
         }
     }
 
@@ -189,37 +206,111 @@ impl Packetizer {
             return Ok(());
         }
 
-        for (index, samples) in block.samples.chunks(self.samples_per_packet).enumerate() {
+        let mut sequence = self.sequence;
+        let mut send_error = None;
+        self.for_each_packet(block, |timestamp, samples| {
             if !transmission.is_enabled() {
-                return Ok(());
+                return false;
             }
             let mut payload = Vec::with_capacity(std::mem::size_of_val(samples));
             for sample in samples {
                 payload.extend_from_slice(&sample.to_le_bytes());
             }
-            let samples_before = index * self.samples_per_packet;
-            let timestamp = block.timestamp + (samples_before / CHANNELS as usize) as u64;
-            let packet = AudioPacket::new(self.sequence, timestamp, Bytes::from(payload));
-            self.sequence = self.sequence.wrapping_add(1);
+            let packet = AudioPacket::new(sequence, timestamp, Bytes::from(payload));
+            sequence = sequence.wrapping_add(1);
 
             match sender.send(&packet) {
                 Ok(()) => {
                     counters.packets_sent.fetch_add(1, Ordering::Relaxed);
+                    true
                 }
                 // A full local QUIC datagram queue is treated as loss. It is
                 // preferable to lose this old frame than to buffer it and grow
                 // latency.
                 Err(TransportError::Quinn(_)) => {
                     counters.packets_dropped.fetch_add(1, Ordering::Relaxed);
+                    true
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    send_error = Some(error);
+                    false
+                }
+            }
+        });
+
+        self.sequence = sequence;
+        match send_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    fn for_each_packet<F>(&mut self, block: PcmBlock, mut callback: F)
+    where
+        F: FnMut(u64, &[i16]) -> bool,
+    {
+        if self.frame_duration_ms == 4 {
+            self.for_each_four_ms_packet(block, callback);
+            return;
+        }
+
+        for (index, samples) in block.samples.chunks(self.samples_per_packet).enumerate() {
+            let timestamp =
+                block.timestamp + (index * self.samples_per_packet / CHANNELS as usize) as u64;
+            if !callback(timestamp, samples) {
+                break;
             }
         }
-        Ok(())
+    }
+
+    fn for_each_four_ms_packet<F>(&mut self, block: PcmBlock, mut callback: F)
+    where
+        F: FnMut(u64, &[i16]) -> bool,
+    {
+        let mut offset = 0;
+        if let Some(tail) = self.pending_tail.take() {
+            let expected_timestamp = tail
+                .timestamp
+                .wrapping_add((FOUR_MS_TAIL_SAMPLES / CHANNELS as usize) as u64);
+            if block.timestamp == expected_timestamp {
+                let mut samples = [0_i16; FOUR_MS_PACKET_SAMPLES];
+                samples[..FOUR_MS_TAIL_SAMPLES].copy_from_slice(&tail.samples);
+                samples[FOUR_MS_TAIL_SAMPLES..].copy_from_slice(
+                    &block.samples[..FOUR_MS_PACKET_SAMPLES - FOUR_MS_TAIL_SAMPLES],
+                );
+                if !callback(tail.timestamp, &samples) {
+                    return;
+                }
+                offset = FOUR_MS_PACKET_SAMPLES - FOUR_MS_TAIL_SAMPLES;
+            }
+        }
+
+        while offset + FOUR_MS_PACKET_SAMPLES <= block.samples.len() {
+            let timestamp = block.timestamp + (offset / CHANNELS as usize) as u64;
+            if !callback(
+                timestamp,
+                &block.samples[offset..offset + FOUR_MS_PACKET_SAMPLES],
+            ) {
+                return;
+            }
+            offset += FOUR_MS_PACKET_SAMPLES;
+        }
+
+        let remaining = block.samples.len() - offset;
+        if remaining == 0 {
+            return;
+        }
+        debug_assert_eq!(remaining, FOUR_MS_TAIL_SAMPLES);
+        let mut samples = [0_i16; FOUR_MS_TAIL_SAMPLES];
+        samples.copy_from_slice(&block.samples[offset..]);
+        self.pending_tail = Some(PendingTail {
+            timestamp: block.timestamp + (offset / CHANNELS as usize) as u64,
+            samples,
+        });
     }
 }
 
-fn samples_per_packet(frame_duration_ms: u8) -> usize {
+const fn samples_per_packet(frame_duration_ms: u8) -> usize {
     (SAMPLE_RATE as usize * frame_duration_ms as usize / 1_000) * CHANNELS as usize
 }
 
@@ -228,11 +319,25 @@ pub async fn process_control_messages(
     writer: &mut ControlWriter,
     connection: &Connection,
     stop: &CancellationToken,
+    volume_adjustment: Arc<AtomicI32>,
 ) {
+    let mut volume_updates = tokio::time::interval(Duration::from_millis(50));
+    volume_updates.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
     loop {
         tokio::select! {
             _ = stop.cancelled() => break,
             _ = connection.closed() => break,
+            _ = volume_updates.tick() => {
+                let steps = volume_adjustment.swap(0, Ordering::AcqRel);
+                if steps != 0 {
+                    let steps = steps.clamp(i32::from(i8::MIN), i32::from(i8::MAX)) as i8;
+                    if let Err(error) = writer.send(&ControlMessage::AdjustVolume { steps }).await {
+                        warn!(%error, "failed to adjust client volume");
+                        break;
+                    }
+                }
+            }
             message = reader.receive() => match message {
                 Ok(ControlMessage::Stop) => {
                     debug!("client requested stream stop");
@@ -277,5 +382,59 @@ mod tests {
         assert_eq!(choose_packet_duration_ms(960).unwrap(), 5);
         assert_eq!(choose_packet_duration_ms(384).unwrap(), 2);
         assert!(choose_packet_duration_ms(100).is_err());
+    }
+
+    fn block(timestamp: u64) -> PcmBlock {
+        PcmBlock {
+            timestamp,
+            samples: [0; PcmBlock::SAMPLE_COUNT],
+        }
+    }
+
+    fn packet_shapes(packetizer: &mut Packetizer, block: PcmBlock) -> Vec<(u64, usize)> {
+        let mut packets = Vec::new();
+        packetizer.for_each_packet(block, |timestamp, samples| {
+            packets.push((timestamp, samples.len()));
+            true
+        });
+        packets
+    }
+
+    #[test]
+    fn four_ms_packetizer_carries_contiguous_tail_without_short_packets() {
+        let mut packetizer = Packetizer::new(4);
+        assert_eq!(
+            packet_shapes(&mut packetizer, block(0)),
+            vec![(0, FOUR_MS_PACKET_SAMPLES), (192, FOUR_MS_PACKET_SAMPLES)]
+        );
+        assert_eq!(
+            packet_shapes(&mut packetizer, block(480)),
+            vec![
+                (384, FOUR_MS_PACKET_SAMPLES),
+                (576, FOUR_MS_PACKET_SAMPLES),
+                (768, FOUR_MS_PACKET_SAMPLES)
+            ]
+        );
+    }
+
+    #[test]
+    fn four_ms_packetizer_discards_tail_after_capture_gap() {
+        let mut packetizer = Packetizer::new(4);
+        let _ = packet_shapes(&mut packetizer, block(0));
+        assert_eq!(
+            packet_shapes(&mut packetizer, block(960)),
+            vec![
+                (960, FOUR_MS_PACKET_SAMPLES),
+                (1152, FOUR_MS_PACKET_SAMPLES)
+            ]
+        );
+        assert_eq!(
+            packet_shapes(&mut packetizer, block(1440)),
+            vec![
+                (1344, FOUR_MS_PACKET_SAMPLES),
+                (1536, FOUR_MS_PACKET_SAMPLES),
+                (1728, FOUR_MS_PACKET_SAMPLES)
+            ]
+        );
     }
 }

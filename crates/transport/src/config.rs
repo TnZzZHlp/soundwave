@@ -4,7 +4,7 @@ use std::{
     sync::Arc,
 };
 
-use quinn::{ClientConfig, ServerConfig, crypto::rustls::QuicClientConfig};
+use quinn::{ClientConfig, ServerConfig, TransportConfig, crypto::rustls::QuicClientConfig};
 use rustls::{
     DigitallySignedStruct, SignatureScheme,
     client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
@@ -13,6 +13,13 @@ use rustls::{
 use sha2::{Digest, Sha256};
 
 use crate::TransportError;
+
+/// Keep only a few 10 ms PCM datagrams queued so congestion drops stale audio.
+const REALTIME_DATAGRAM_BUFFER_BYTES: usize = 8 * 1024;
+const _: () = assert!(
+    REALTIME_DATAGRAM_BUFFER_BYTES >= 4 * (1_920 + 12)
+        && REALTIME_DATAGRAM_BUFFER_BYTES <= 8 * (1_920 + 12),
+);
 
 /// Certificate DER and its SHA-256 fingerprint used to pair an Android client.
 #[derive(Clone, Debug)]
@@ -73,8 +80,11 @@ fn server_config_from_der(
 ) -> Result<(ServerConfig, CertificateIdentity), TransportError> {
     let private_key = PrivateKeyDer::Pkcs8(private_key_der.into());
     let certificate = CertificateDer::from(certificate_der.clone());
-    let server_config = ServerConfig::with_single_cert(vec![certificate], private_key)
+    let mut transport = TransportConfig::default();
+    transport.datagram_send_buffer_size(REALTIME_DATAGRAM_BUFFER_BYTES);
+    let mut server_config = ServerConfig::with_single_cert(vec![certificate], private_key)
         .map_err(|error| TransportError::Certificate(error.to_string()))?;
+    server_config.transport_config(Arc::new(transport));
     Ok((
         server_config,
         CertificateIdentity {
@@ -157,7 +167,11 @@ pub fn make_pinned_client_config(fingerprint: [u8; 32]) -> Result<ClientConfig, 
         .with_no_client_auth();
     let quic_crypto = QuicClientConfig::try_from(client_crypto)
         .map_err(|error| TransportError::Certificate(error.to_string()))?;
-    Ok(ClientConfig::new(Arc::new(quic_crypto)))
+    let mut transport = TransportConfig::default();
+    transport.datagram_receive_buffer_size(Some(REALTIME_DATAGRAM_BUFFER_BYTES));
+    let mut client_config = ClientConfig::new(Arc::new(quic_crypto));
+    client_config.transport_config(Arc::new(transport));
+    Ok(client_config)
 }
 
 #[derive(Debug)]

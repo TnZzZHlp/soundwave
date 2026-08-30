@@ -181,11 +181,29 @@ pub fn buffer_duration_ms() -> u64 {
     })
 }
 
+pub fn take_volume_adjustment() -> i32 {
+    engine_slot()
+        .lock()
+        .ok()
+        .and_then(|engine| {
+            engine
+                .as_ref()
+                .map(|engine| engine.state.take_volume_adjustment())
+        })
+        .unwrap_or(0)
+}
+
 pub fn estimated_latency_ms() -> u64 {
-    let rtt_half = with_state(|state| state.rtt_ms() / 2);
+    let Some((rtt_half, jitter_buffer_ms)) = engine_slot().lock().ok().and_then(|engine| {
+        engine.as_ref().and_then(|engine| {
+            (engine.state.state() == ClientState::Connected)
+                .then(|| (engine.state.rtt_ms() / 2, engine.state.jitter_buffer_ms()))
+        })
+    }) else {
+        return 0;
+    };
     // This is deliberately an estimate, not a claim about speaker output time.
-    // The 50 ms term is the target jitter delay before samples enter the ring.
-    rtt_half + buffer_duration_ms() + 50
+    rtt_half + buffer_duration_ms() + jitter_buffer_ms
 }
 
 /// Maps an unsigned counter to the Java `long` return type, saturating
@@ -301,6 +319,18 @@ pub extern "system" fn Java_com_example_audiostream_NativeBridge_nativeGetBuffer
 ) -> jlong {
     unowned_env
         .with_env(|_| -> jni::errors::Result<jlong> { Ok(to_jlong(buffer_duration_ms())) })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_example_audiostream_NativeBridge_nativeTakeVolumeAdjustment<
+    'local,
+>(
+    mut unowned_env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+) -> jint {
+    unowned_env
+        .with_env(|_| -> jni::errors::Result<jint> { Ok(take_volume_adjustment()) })
         .resolve::<ThrowRuntimeExAndDefault>()
 }
 

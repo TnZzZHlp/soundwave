@@ -12,3 +12,5 @@ mod player;
 mod receiver;
 mod ring_buffer;
 mod state;
+
+const MAX_JITTER_BUFFER_MS: usize = 100;

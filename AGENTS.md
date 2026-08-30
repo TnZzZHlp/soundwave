@@ -30,7 +30,7 @@ android/app/src/main/java/com/example/audiostream/  # MainActivity, AudioService
 
 ```bash
 cargo check --workspace --all-targets          # also passes with --all-features
-cargo test --workspace                          # 14 tests pass
+cargo test --workspace                          # 21 tests pass
 cargo fmt --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo lint
@@ -49,11 +49,11 @@ Android packaging is NOT done via cargo: Gradle task `buildRustNative` runs `car
 
 ## Architecture rules to preserve
 
-- Wire format: fixed 12-byte network-order header (`sequence u32 | timestamp u64`) + i16 LE PCM; control messages (Hello/StreamInfo/Start/Stop/Ping/Pong) are postcard on a reliable QUIC stream. `PROTOCOL_VERSION` lives in the protocol crate.
+- Wire format: fixed 12-byte network-order header (`sequence u32 | timestamp u64`) + i16 LE PCM; control messages (Hello/StreamInfo/Start/Stop/Ping/Pong/AdjustVolume) are postcard on a reliable QUIC stream. `PROTOCOL_VERSION` lives in the protocol crate.
 - Bounded latency policy: if the capture queue or PCM ring is full, drop the oldest; underrun becomes silence. Never let buffering grow unbounded.
 - Datagram sizing: the server uses Quinn's advertised max datagram size and splits 10 ms capture blocks into 5/4/2/1 ms packets as needed; never assume an Ethernet MTU or rely on IP fragmentation.
 - Security: server generates a self-signed cert+key on first run in `%LOCALAPPDATA%\Soundwave` (or `--identity-dir`); the client pins the leaf SHA-256 fingerprint. A changed fingerprint is a pairing change, not a certificate error to paper over.
-- Jitter target is 50 ms; confirmed-missing sequences become silence, never infinite waits.
+- Jitter starts at 20 ms and Android automatically raises it in 10 ms steps after underruns or late packets, capped at 100 ms. Confirmed-missing sequences become silence, never infinite waits.
 
 ## Constraints and pitfalls
 

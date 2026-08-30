@@ -110,10 +110,12 @@ fn capture_loop(
         TARGET_CHANNELS,
         None,
     );
-    let (default_period, _) = audio_client.get_periods()?;
+    let (_, minimum_period) = audio_client.get_periods()?;
+    // Request the shortest shared-mode device buffer; BlockAssembler still
+    // preserves the documented 10 ms capture queue on the wire.
     audio_client.initialize_client(
         &target_format,
-        default_period,
+        minimum_period,
         &Direction::Capture,
         &ShareMode::Shared,
         true,

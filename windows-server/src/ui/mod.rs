@@ -4,7 +4,11 @@ use std::{
     mem::size_of,
     net::SocketAddr,
     path::{Path, PathBuf},
-    sync::mpsc::{self, Receiver, Sender, SyncSender, TryRecvError},
+    sync::{
+        Arc,
+        atomic::{AtomicI32, Ordering},
+        mpsc::{self, Receiver, Sender, SyncSender, TryRecvError},
+    },
     thread,
 };
 
@@ -56,6 +60,8 @@ const COMMAND_SERVER_INFORMATION: u16 = 2;
 const COMMAND_SETTINGS: u16 = 3;
 const COMMAND_TOGGLE_SERVICE: u16 = 4;
 const COMMAND_EXIT: u16 = 5;
+const COMMAND_VOLUME_UP: u16 = 6;
+const COMMAND_VOLUME_DOWN: u16 = 7;
 
 /// Immutable server details displayed by the Windows status UI.
 #[derive(Clone)]
@@ -98,6 +104,7 @@ struct UiContext {
     status: UiStatus,
     shutdown: CancellationToken,
     transmission: AudioTransmissionGate,
+    volume_adjustment: Arc<AtomicI32>,
     receiver: Receiver<UiCommand>,
     status_label: Option<HWND>,
     qr_matrix: Option<QrMatrix>,
@@ -121,13 +128,23 @@ impl ServerUi {
         info: ServerUiInfo,
         shutdown: CancellationToken,
         transmission: AudioTransmissionGate,
+        volume_adjustment: Arc<AtomicI32>,
     ) -> Result<Self> {
         let (sender, receiver) = mpsc::channel();
         let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
 
         thread::Builder::new()
             .name("soundwave-windows-ui".to_owned())
-            .spawn(move || run_ui_thread(info, shutdown, transmission, receiver, ready_sender))
+            .spawn(move || {
+                run_ui_thread(
+                    info,
+                    shutdown,
+                    transmission,
+                    volume_adjustment,
+                    receiver,
+                    ready_sender,
+                )
+            })
             .context("could not start the Windows UI thread")?;
 
         match ready_receiver
@@ -217,6 +234,7 @@ fn run_ui_thread(
     info: ServerUiInfo,
     shutdown: CancellationToken,
     transmission: AudioTransmissionGate,
+    volume_adjustment: Arc<AtomicI32>,
     receiver: Receiver<UiCommand>,
     ready_sender: SyncSender<Result<(), String>>,
 ) {
@@ -226,6 +244,7 @@ fn run_ui_thread(
             status: UiStatus::WaitingForClient,
             shutdown,
             transmission,
+            volume_adjustment,
             receiver,
             status_label: None,
             qr_matrix: None,
@@ -537,6 +556,8 @@ fn handle_command(hwnd: HWND, command: u16) {
         COMMAND_SERVER_INFORMATION => show_server_information(hwnd),
         COMMAND_SETTINGS => show_settings(hwnd),
         COMMAND_TOGGLE_SERVICE => toggle_audio_transmission(),
+        COMMAND_VOLUME_UP => adjust_client_volume(1),
+        COMMAND_VOLUME_DOWN => adjust_client_volume(-1),
         COMMAND_EXIT => request_shutdown(hwnd),
         _ => {}
     }
@@ -561,6 +582,23 @@ fn toggle_audio_transmission() {
         let _ = unsafe { SetWindowTextW(label, &text) };
     }
     info!(enabled, "audio transmission service toggled");
+}
+
+fn adjust_client_volume(steps: i32) {
+    UI_CONTEXT.with(|context| {
+        let context = context.borrow();
+        let Some(context) = context.as_ref() else {
+            return;
+        };
+        if !matches!(&context.status, UiStatus::Streaming(_)) {
+            return;
+        }
+        let _ = context.volume_adjustment.fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |pending| Some(pending.saturating_add(steps)),
+        );
+    });
 }
 
 fn audio_transmission_is_enabled() -> bool {
@@ -604,6 +642,22 @@ fn show_context_menu(hwnd: HWND) {
                 MF_STRING,
                 COMMAND_TOGGLE_SERVICE as usize,
                 toggle_label,
+            )
+        })
+        .and_then(|()| {
+            AppendMenuW(
+                menu,
+                MF_STRING,
+                COMMAND_VOLUME_UP as usize,
+                w!("Increase phone volume"),
+            )
+        })
+        .and_then(|()| {
+            AppendMenuW(
+                menu,
+                MF_STRING,
+                COMMAND_VOLUME_DOWN as usize,
+                w!("Decrease phone volume"),
             )
         })
         .and_then(|()| AppendMenuW(menu, MF_SEPARATOR, 0, w!("")))

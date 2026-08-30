@@ -4,11 +4,10 @@ use crossbeam_queue::ArrayQueue;
 
 use audio_stream_audio_common::{CHANNELS, SAMPLE_RATE};
 
-/// 400 ms cap: enough headroom to ride out `WiFi` stall bursts, while making
-/// latency growth impossible even if the audio device temporarily stalls.
-/// Ring capacity only bounds stall tolerance; steady-state playback latency
-/// is set by the jitter target, not by this constant.
-pub const PCM_RING_CAPACITY_SAMPLES: usize = SAMPLE_RATE as usize * CHANNELS as usize * 2 / 5;
+/// Supports the largest automatic jitter target. This is only a hard
+/// stale-audio ceiling; normal occupancy follows the adaptive target.
+pub const PCM_RING_CAPACITY_SAMPLES: usize =
+    SAMPLE_RATE as usize * CHANNELS as usize * crate::MAX_JITTER_BUFFER_MS / 1_000;
 
 /// A lock-free bounded PCM ring. Its public methods only need `&self`, so the
 /// network producer and Kotlin's `AudioTrack` writer never contend on a mutex.

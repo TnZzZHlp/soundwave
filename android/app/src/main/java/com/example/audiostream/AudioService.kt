@@ -5,12 +5,14 @@ import android.app.Service
 import android.content.Intent
 import android.media.AudioAttributes
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioTrack
 import android.net.wifi.WifiManager
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.Process
+import kotlin.math.abs
 import kotlin.math.max
 
 /**
@@ -26,6 +28,11 @@ class AudioService : Service() {
         const val EXTRA_FINGERPRINT = "fingerprint"
         private const val SAMPLE_RATE = 48_000
         private const val CHANNELS = 2
+        private const val PLAYBACK_CHUNK_FRAMES = SAMPLE_RATE / 200
+        private const val AUDIO_BUFFER_FRAMES = PLAYBACK_CHUNK_FRAMES * 2
+        private const val FRAME_SAMPLES = PLAYBACK_CHUNK_FRAMES * CHANNELS
+        private const val STARTUP_POLL_MS = 10L
+        private const val CONNECTED_POLL_MS = 100L
     }
 
     @Volatile private var playbackRunning = false
@@ -34,6 +41,7 @@ class AudioService : Service() {
     private var wifiLock: WifiManager.WifiLock? = null
     private var reconnectRequested = false
     private var currentServer = ""
+    private var lastNotifiedState = Int.MIN_VALUE
     private val mainHandler = Handler(Looper.getMainLooper())
 
     private val statusUpdater = object : Runnable {
@@ -46,13 +54,21 @@ class AudioService : Service() {
                 NativeBridge.STATE_DISCONNECTED -> "Disconnected"
                 else -> "Preparing audio stream"
             }
-            getSystemService(NotificationManager::class.java)
-                .notify(NotificationHelper.NOTIFICATION_ID, NotificationHelper.build(this@AudioService, text))
+            if (state != lastNotifiedState) {
+                getSystemService(NotificationManager::class.java)
+                    .notify(NotificationHelper.NOTIFICATION_ID, NotificationHelper.build(this@AudioService, text))
+                lastNotifiedState = state
+            }
             syncStreamingResources(state)
-            // Keep the pre-playback ring from filling while the native session
-            // finishes connecting; a callback is unnecessary for this small delay.
             if (reconnectRequested) {
-                mainHandler.postDelayed(this, 100)
+                // Poll quickly only until the native handshake completes; after
+                // that, the slower poll still releases resources after a drop.
+                val delay = if (state == NativeBridge.STATE_CONNECTING) {
+                    STARTUP_POLL_MS
+                } else {
+                    CONNECTED_POLL_MS
+                }
+                mainHandler.postDelayed(this, delay)
             }
         }
     }
@@ -80,6 +96,7 @@ class AudioService : Service() {
 
     override fun onDestroy() {
         reconnectRequested = false
+        lastNotifiedState = Int.MIN_VALUE
         mainHandler.removeCallbacks(statusUpdater)
         stopPlayback()
         releaseWifiLock()
@@ -100,6 +117,7 @@ class AudioService : Service() {
         }
 
         reconnectRequested = true
+        lastNotifiedState = Int.MIN_VALUE
         currentServer = "$host:$port"
         startForeground(
             NotificationHelper.NOTIFICATION_ID,
@@ -112,6 +130,7 @@ class AudioService : Service() {
 
     private fun disconnectAndStop() {
         reconnectRequested = false
+        lastNotifiedState = Int.MIN_VALUE
         mainHandler.removeCallbacks(statusUpdater)
         NativeBridge.nativeDisconnect()
         stopPlayback()
@@ -124,6 +143,7 @@ class AudioService : Service() {
         if (reconnectRequested && state == NativeBridge.STATE_CONNECTED) {
             acquireWifiLock()
             startPlayback()
+            applyVolumeAdjustment()
         } else {
             stopPlayback()
             releaseWifiLock()
@@ -139,7 +159,7 @@ class AudioService : Service() {
             AudioFormat.CHANNEL_OUT_STEREO,
             AudioFormat.ENCODING_PCM_16BIT,
         )
-        val bufferBytes = max(minBufferBytes, SAMPLE_RATE * CHANNELS * 2 / 25) // at least 40 ms
+        val bufferBytes = max(minBufferBytes, AUDIO_BUFFER_FRAMES * CHANNELS * 2)
         val track = AudioTrack.Builder()
             .setAudioAttributes(
                 AudioAttributes.Builder()
@@ -155,14 +175,21 @@ class AudioService : Service() {
                     .build(),
             )
             .setTransferMode(AudioTrack.MODE_STREAM)
+            .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
             .setBufferSizeInBytes(bufferBytes)
             .build()
+        // getMinBufferSize() is a safe capacity, not a latency target. Shrink
+        // the effective queue after construction; Android permits this for a
+        // low-latency track and keeps the larger allocation as a safety margin.
+        track.setBufferSizeInFrames(AUDIO_BUFFER_FRAMES)
 
         playbackRunning = true
         audioTrack = track
         val thread = Thread({
             Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
-            val output = ShortArray(bufferBytes / 2)
+            // Keep each blocking write to one 5 ms chunk instead of batching
+            // a whole platform buffer ahead of the speaker.
+            val output = ShortArray(FRAME_SAMPLES)
             try {
                 track.play()
                 while (playbackRunning && audioTrack === track) {
@@ -186,6 +213,18 @@ class AudioService : Service() {
         }, "SoundwaveAudioTrack")
         audioThread = thread
         thread.start()
+    }
+
+    private fun applyVolumeAdjustment() {
+        val steps = NativeBridge.nativeTakeVolumeAdjustment()
+        if (steps == 0) return
+        val manager = getSystemService(AudioManager::class.java)
+        val direction = if (steps > 0) AudioManager.ADJUST_RAISE else AudioManager.ADJUST_LOWER
+        runCatching {
+            repeat(abs(steps)) {
+                manager.adjustStreamVolume(AudioManager.STREAM_MUSIC, direction, 0)
+            }
+        }
     }
 
     private fun stopPlayback() {

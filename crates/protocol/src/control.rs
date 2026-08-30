@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ControlError;
 
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 4;
 
 /// Audio sample representation advertised before streaming begins.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -28,6 +28,7 @@ pub enum ControlMessage {
     Stop,
     Ping { timestamp: u64 },
     Pong { timestamp: u64 },
+    AdjustVolume { steps: i8 },
 }
 
 impl ControlMessage {
@@ -56,6 +57,11 @@ mod tests {
         assert_eq!(
             ControlMessage::decode(&original.encode().unwrap()).unwrap(),
             original
+        );
+        let volume = ControlMessage::AdjustVolume { steps: -1 };
+        assert_eq!(
+            ControlMessage::decode(&volume.encode().unwrap()).unwrap(),
+            volume
         );
     }
 }

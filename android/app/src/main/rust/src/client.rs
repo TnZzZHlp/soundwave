@@ -153,6 +153,9 @@ async fn connected_loop(
                             state.set_rtt_ms(now_ms - timestamp);
                         }
                     }
+                    ControlMessage::AdjustVolume { steps } => {
+                        state.add_volume_adjustment(steps);
+                    }
                     unexpected => return Err(ClientError::Runtime(format!("unexpected control message: {unexpected:?}"))),
                 }
             }
@@ -225,6 +228,7 @@ mod tests {
         let server = Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap()).unwrap();
         let server_address = server.local_addr().unwrap();
         let (close_server, wait_for_close) = tokio::sync::oneshot::channel();
+        let (second_connection_seen, second_connection_observed) = tokio::sync::oneshot::channel();
 
         let server_task = tokio::spawn(async move {
             let incoming = server.accept().await.unwrap();
@@ -254,6 +258,10 @@ mod tests {
                 .await
                 .unwrap();
             writer.send(&ControlMessage::Start).await.unwrap();
+            writer
+                .send(&ControlMessage::AdjustVolume { steps: 1 })
+                .await
+                .unwrap();
 
             let sender = DatagramSender::new(connection.clone()).unwrap();
             let payload = vec![0_u8; 960];
@@ -265,10 +273,25 @@ mod tests {
                         payload.clone(),
                     ))
                     .unwrap();
+                tokio::task::yield_now().await;
             }
             wait_for_close.await.unwrap();
+            let close_at = Instant::now();
             connection.close(VarInt::from_u32(0), b"test server stopped");
             connection.closed().await;
+
+            let incoming = tokio::time::timeout(Duration::from_secs(3), server.accept())
+                .await
+                .expect("server should accept a retrying client")
+                .expect("server endpoint should remain open");
+            let second_connection = incoming
+                .await
+                .expect("server should establish the retrying connection");
+            second_connection_seen
+                .send(close_at.elapsed())
+                .expect("test should still await the retrying connection");
+            second_connection.close(VarInt::from_u32(0), b"test server stopped");
+            second_connection.closed().await;
         });
 
         let ring = Arc::new(PcmRingBuffer::new(PCM_RING_CAPACITY_SAMPLES));
@@ -283,24 +306,53 @@ mod tests {
             stop.clone(),
         ));
 
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while state.received_packets() < 12 || ring.available_samples() < 9_600 {
+        let volume_adjustment = tokio::time::timeout(Duration::from_secs(2), async {
+            let mut volume_adjustment = 0;
+            loop {
+                volume_adjustment += state.take_volume_adjustment();
+                if state.received_packets() >= 12
+                    && ring.available_samples() >= PCM_RING_CAPACITY_SAMPLES
+                    && volume_adjustment != 0
+                {
+                    break volume_adjustment;
+                }
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
         })
         .await
-        .expect("client should receive test datagrams");
+        .expect("client should receive test datagrams and volume adjustment");
         assert_eq!(state.state(), ClientState::Connected);
-        assert!(ring.available_samples() >= 9_600);
+        assert_eq!(state.jitter_buffer_ms(), 20);
+        assert_eq!(volume_adjustment, 1);
+        assert!(ring.available_samples() >= PCM_RING_CAPACITY_SAMPLES);
 
         close_server.send(()).unwrap();
-        tokio::time::timeout(Duration::from_millis(500), async {
-            while state.state() != ClientState::Connecting {
+        let state_after_close = tokio::time::timeout(Duration::from_millis(500), async {
+            loop {
+                let state = state.state();
+                if state != ClientState::Connected {
+                    break state;
+                }
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
         })
         .await
-        .expect("client should enter reconnecting state after server closes");
+        .expect("client should leave connected state after server closes");
+        assert!(matches!(
+            state_after_close,
+            ClientState::Connecting | ClientState::Error
+        ));
+        let second_connection_elapsed = tokio::time::timeout(
+            RETRY_INITIAL_DELAY + Duration::from_secs(2),
+            second_connection_observed,
+        )
+        .await
+        .expect("client should retry after the documented backoff")
+        .expect("server should observe the retrying connection");
+        assert!(
+            second_connection_elapsed >= RETRY_INITIAL_DELAY,
+            "retrying connection started after {second_connection_elapsed:?}, before the documented backoff"
+        );
 
         stop.cancel();
         client_task.await.unwrap();
