@@ -3,7 +3,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
 };
 
-use audio_stream_transport::PairingUri;
+use audio_stream_transport::encode_pairing_uri;
 use thiserror::Error;
 use windows::Win32::{
     Foundation::{ERROR_BUFFER_OVERFLOW, NO_ERROR},
@@ -81,7 +81,7 @@ pub(crate) fn resolve_pairing_info(
 
     Ok(PairingInfo {
         endpoint,
-        uri: PairingUri::new(host, endpoint.port(), fingerprint).encode(),
+        uri: encode_pairing_uri(host, endpoint.port(), fingerprint),
     })
 }
 

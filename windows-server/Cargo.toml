@@ -7,7 +7,6 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-audio-stream-audio-common = { path = "../crates/audio-common" }
 audio-stream-protocol = { path = "../crates/protocol" }
 audio-stream-transport = { path = "../crates/transport" }
 bytes.workspace = true

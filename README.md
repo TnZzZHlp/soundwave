@@ -20,8 +20,7 @@ The Android native crate is included in the top-level Cargo workspace so its por
 ```text
 .
 ├── crates/
-│   ├── protocol/       # Manual audio datagram encoding and postcard control messages
-│   ├── audio-common/   # PCM format helpers and tested SPSC ring utility
+│   ├── protocol/       # Audio format constants, datagram encoding, and control messages
 │   └── transport/      # Quinn control/datagram helpers and fingerprint-pinned TLS
 ├── windows-server/     # WASAPI loopback CLI and QUIC sender
 └── android/

@@ -50,12 +50,6 @@ impl ControlWriter {
             .await
             .map_err(|error| TransportError::Quinn(error.to_string()))
     }
-
-    pub fn finish(&mut self) -> Result<(), TransportError> {
-        self.stream
-            .finish()
-            .map_err(|error| TransportError::Quinn(error.to_string()))
-    }
 }
 
 impl ControlReader {

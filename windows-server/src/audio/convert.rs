@@ -1,5 +1,3 @@
-use audio_stream_audio_common::f32_to_i16;
-
 use super::capture::AudioError;
 
 /// Converts interleaved little-endian f32 data supplied by the WASAPI shared
@@ -17,7 +15,13 @@ pub fn f32_le_to_i16(input: &[u8], output: &mut Vec<i16>) -> Result<(), AudioErr
                 .try_into()
                 .map_err(|_| AudioError::InvalidCaptureBytes(input.len()))?,
         );
-        output.push(f32_to_i16(sample));
+        let sample = sample.clamp(-1.0, 1.0);
+        #[allow(clippy::cast_possible_truncation)]
+        output.push(if sample >= 0.0 {
+            (sample * f32::from(i16::MAX)).round() as i16
+        } else {
+            (sample * -f32::from(i16::MIN)).round() as i16
+        });
     }
     Ok(())
 }

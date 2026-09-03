@@ -1,15 +1,10 @@
-use std::{
-    net::SocketAddr,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use audio_stream_protocol::{ControlMessage, PROTOCOL_VERSION, StreamInfo};
 use audio_stream_transport::{
     ControlReader, ControlWriter, DatagramReceiver, make_pinned_client_config,
 };
 use quinn::{Connection, Endpoint, VarInt};
-use tokio_util::sync::CancellationToken;
 
 use crate::{
     error::ClientError,
@@ -23,32 +18,18 @@ const RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
 /// Upper bound for the exponential backoff between reconnection attempts.
 const RETRY_MAX_DELAY: Duration = Duration::from_secs(10);
 
-/// Runs one QUIC session and, unless [`stop`](CancellationToken) was
-/// cancelled (which only a user-initiated disconnect does), retries forever
-/// with an exponential backoff so a restarting server or recovering network
-/// is picked up without a manual reconnect.
+/// Runs one QUIC session and retries forever with an exponential backoff so a
+/// restarting server or recovering network is picked up without manual reconnect.
 pub async fn run_session(
     address: SocketAddr,
     fingerprint: [u8; 32],
     ring: Arc<PcmRingBuffer>,
     state: Arc<SharedState>,
-    stop: CancellationToken,
 ) {
     let mut retry_attempt = 0_u32;
     loop {
-        let result = run_session_inner(
-            address,
-            fingerprint,
-            ring.clone(),
-            state.clone(),
-            stop.clone(),
-        )
-        .await;
+        let result = run_session_inner(address, fingerprint, ring.clone(), state.clone()).await;
         ring.clear();
-        if stop.is_cancelled() {
-            state.set(ClientState::Disconnected);
-            return;
-        }
         // A session that ended cleanly means the server was reachable moments
         // ago; restart the backoff so a briefly offline server is caught fast.
         match result {
@@ -60,15 +41,7 @@ pub async fn run_session(
             }
             Err(error) => state.set_error(&error),
         }
-        // Cancellation during the wait exits immediately instead of after the
-        // full backoff delay.
-        tokio::select! {
-            () = stop.cancelled() => {
-                state.set(ClientState::Disconnected);
-                return;
-            }
-            () = tokio::time::sleep(retry_delay(retry_attempt)) => {}
-        }
+        tokio::time::sleep(retry_delay(retry_attempt)).await;
         retry_attempt = retry_attempt.saturating_add(1);
         state.set(ClientState::Connecting);
     }
@@ -88,7 +61,6 @@ async fn run_session_inner(
     fingerprint: [u8; 32],
     ring: Arc<PcmRingBuffer>,
     state: Arc<SharedState>,
-    stop: CancellationToken,
 ) -> Result<(), ClientError> {
     let mut endpoint = Endpoint::client(SocketAddr::from(([0, 0, 0, 0], 0)))?;
     endpoint.set_default_client_config(make_pinned_client_config(fingerprint)?);
@@ -97,12 +69,11 @@ async fn run_session_inner(
         .map_err(|error| {
             ClientError::Runtime(format!("could not start QUIC connection: {error}"))
         })?;
-    let connection = tokio::select! {
-        connection = connecting => connection.map_err(|error| ClientError::Runtime(error.to_string()))?,
-        () = stop.cancelled() => return Ok(()),
-    };
+    let connection = connecting
+        .await
+        .map_err(|error| ClientError::Runtime(error.to_string()))?;
 
-    let result = connected_loop(&connection, ring, state, stop.clone()).await;
+    let result = connected_loop(&connection, ring, state).await;
     connection.close(VarInt::from_u32(0), b"android disconnected");
     endpoint.close(VarInt::from_u32(0), b"android disconnected");
     result
@@ -112,7 +83,6 @@ async fn connected_loop(
     connection: &Connection,
     ring: Arc<PcmRingBuffer>,
     state: Arc<SharedState>,
-    stop: CancellationToken,
 ) -> Result<(), ClientError> {
     let (send, recv) = connection
         .open_bi()
@@ -134,35 +104,24 @@ async fn connected_loop(
     let datagrams = DatagramReceiver::new(connection.clone())?;
     state.set(ClientState::Connected);
 
-    let started = Instant::now();
-    let mut heartbeat = tokio::time::interval(Duration::from_secs(2));
-    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
-            () = stop.cancelled() => return Ok(()),
             _ = connection.closed() => return Ok(()),
-            packet = datagrams.receive() => pipeline.handle_packet(packet?),
+            packet = datagrams.receive() => {
+                let packet = packet?;
+                state.set_rtt_ms(
+                    u64::try_from(connection.rtt().as_millis()).unwrap_or(u64::MAX),
+                );
+                pipeline.handle_packet(packet);
+            }
             message = reader.receive() => {
                 match message? {
                     ControlMessage::Stop => return Ok(()),
-                    ControlMessage::Ping { timestamp } => writer.send(&ControlMessage::Pong { timestamp }).await?,
-                    ControlMessage::Pong { timestamp } => {
-                        let now_ms =
-                            u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-                        if now_ms >= timestamp {
-                            state.set_rtt_ms(now_ms - timestamp);
-                        }
-                    }
                     ControlMessage::AdjustVolume { steps } => {
                         state.add_volume_adjustment(steps);
                     }
                     unexpected => return Err(ClientError::Runtime(format!("unexpected control message: {unexpected:?}"))),
                 }
-            }
-            _ = heartbeat.tick() => {
-                let timestamp =
-                    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-                writer.send(&ControlMessage::Ping { timestamp }).await?;
             }
         }
     }
@@ -202,7 +161,7 @@ async fn expect_start(reader: &mut ControlReader) -> Result<(), ClientError> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{sync::Arc, time::Instant};
 
     use audio_stream_protocol::{SampleFormat, StreamInfo};
     use audio_stream_transport::{DatagramSender, make_server_config};
@@ -296,14 +255,12 @@ mod tests {
 
         let ring = Arc::new(PcmRingBuffer::new(PCM_RING_CAPACITY_SAMPLES));
         let state = Arc::new(SharedState::default());
-        let stop = CancellationToken::new();
         state.begin_connecting();
         let client_task = tokio::spawn(run_session(
             server_address,
             identity.sha256_fingerprint,
             ring.clone(),
             state.clone(),
-            stop.clone(),
         ));
 
         let volume_adjustment = tokio::time::timeout(Duration::from_secs(2), async {
@@ -354,8 +311,8 @@ mod tests {
             "retrying connection started after {second_connection_elapsed:?}, before the documented backoff"
         );
 
-        stop.cancel();
-        client_task.await.unwrap();
+        client_task.abort();
+        assert!(client_task.await.unwrap_err().is_cancelled());
         server_task.await.unwrap();
     }
 }

@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crossbeam_queue::ArrayQueue;
 
-use audio_stream_audio_common::{CHANNELS, SAMPLE_RATE};
+use audio_stream_protocol::{CHANNELS, SAMPLE_RATE};
 
 /// Supports the largest automatic jitter target. This is only a hard
 /// stale-audio ceiling; normal occupancy follows the adaptive target.
@@ -14,7 +14,6 @@ pub const PCM_RING_CAPACITY_SAMPLES: usize =
 pub struct PcmRingBuffer {
     queue: ArrayQueue<i16>,
     underruns: AtomicU64,
-    overwritten_samples: AtomicU64,
 }
 
 impl PcmRingBuffer {
@@ -22,18 +21,13 @@ impl PcmRingBuffer {
         Self {
             queue: ArrayQueue::new(capacity_samples),
             underruns: AtomicU64::new(0),
-            overwritten_samples: AtomicU64::new(0),
         }
     }
 
-    pub fn write_pcm_le(&self, pcm: &[u8]) -> bool {
-        if pcm.len() % std::mem::size_of::<i16>() != 0 {
-            return false;
-        }
+    pub fn write_pcm_le(&self, pcm: &[u8]) {
         for bytes in pcm.chunks_exact(std::mem::size_of::<i16>()) {
             self.push_latest(i16::from_le_bytes([bytes[0], bytes[1]]));
         }
-        true
     }
 
     pub fn write_silence(&self, samples: usize) {
@@ -72,20 +66,12 @@ impl PcmRingBuffer {
         self.underruns.load(Ordering::Relaxed)
     }
 
-    pub fn overwritten_samples(&self) -> u64 {
-        self.overwritten_samples.load(Ordering::Relaxed)
-    }
-
     fn push_latest(&self, sample: i16) {
         if let Err(sample) = self.queue.push(sample) {
             // The only producer is the receiver task. Removing before retrying
             // deliberately discards the oldest audible data, not the newest.
-            if self.queue.pop().is_some() {
-                self.overwritten_samples.fetch_add(1, Ordering::Relaxed);
-            }
-            if self.queue.push(sample).is_err() {
-                self.overwritten_samples.fetch_add(1, Ordering::Relaxed);
-            }
+            let _ = self.queue.pop();
+            let _ = self.queue.push(sample);
         }
     }
 }
@@ -97,7 +83,7 @@ mod tests {
     #[test]
     fn ring_overwrites_oldest_and_silences_underrun() {
         let ring = PcmRingBuffer::new(3);
-        assert!(ring.write_pcm_le(&[1, 0, 2, 0, 3, 0, 4, 0]));
+        ring.write_pcm_le(&[1, 0, 2, 0, 3, 0, 4, 0]);
         let mut output = [99_i16; 5];
         assert_eq!(ring.read_into(&mut output), 3);
         assert_eq!(output, [2, 3, 4, 0, 0]);

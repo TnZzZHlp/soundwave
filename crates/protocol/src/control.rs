@@ -2,7 +2,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::ControlError;
 
-pub const PROTOCOL_VERSION: u16 = 4;
+pub const PROTOCOL_VERSION: u16 = 5;
+pub const SAMPLE_RATE: u32 = 48_000;
+pub const CHANNELS: u8 = 2;
 
 /// Audio sample representation advertised before streaming begins.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -26,8 +28,6 @@ pub enum ControlMessage {
     StreamInfo(StreamInfo),
     Start,
     Stop,
-    Ping { timestamp: u64 },
-    Pong { timestamp: u64 },
     AdjustVolume { steps: i8 },
 }
 

@@ -11,8 +11,7 @@ Ownership split: Rust owns QUIC, packet validation, certificate pinning, jitter 
 ## Repository layout
 
 ```text
-crates/protocol/        # Manual datagram encoding (fixed 12-byte header) + postcard control messages
-crates/audio-common/    # PCM format helpers, SPSC ring (rtrb), conversion utilities
+crates/protocol/        # Audio constants, fixed 12-byte datagram header, postcard control messages
 crates/transport/       # Quinn helpers, self-signed cert generation, fingerprint-pinned TLS
 windows-server/         # WASAPI loopback CLI (clap) + QUIC sender; cfg(windows)-gated
 android/app/src/main/rust/     # Android QUIC/jitter/ring JNI cdylib ("soundwave_native")
@@ -22,7 +21,7 @@ android/app/src/main/java/com/example/audiostream/  # MainActivity, AudioService
 ## Stack
 
 - Rust, edition 2024, rust-version 1.85; toolchain pinned via `rust-toolchain.toml` (stable + clippy + rustfmt).
-- tokio, quinn 0.11 (rustls 0.23 with ring), postcard, serde, rtrb (SPSC ring), crossbeam-channel, thiserror, tracing; `jni` + `arc-swap` + `crossbeam-queue` on the Android crate; `wasapi` is a `[target.'cfg(windows)'.dependencies]`-only dep.
+- tokio, quinn 0.11 (rustls 0.23 with ring), postcard, serde, crossbeam-channel, thiserror, tracing; `jni` + `arc-swap` + `crossbeam-queue` on the Android crate; `wasapi` is a `[target.'cfg(windows)'.dependencies]`-only dep.
 - All dependencies are declared in the root `Cargo.toml` `[workspace.dependencies]` and referenced as `x.workspace = true`; internal crates use path deps. Add new deps there, not in crate manifests.
 - Android: Kotlin 2.0.21, AGP 8.7.3, compileSdk/targetSdk 36, minSdk 26, Java 17, ABIs arm64-v8a + x86_64.
 

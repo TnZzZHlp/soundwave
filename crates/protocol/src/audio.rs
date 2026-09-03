@@ -45,16 +45,17 @@ impl AudioPacket {
             });
         }
 
-        let sequence = u32::from_be_bytes(
-            encoded[0..4]
-                .try_into()
-                .map_err(|_| PacketError::Malformed)?,
-        );
-        let timestamp = u64::from_be_bytes(
-            encoded[4..12]
-                .try_into()
-                .map_err(|_| PacketError::Malformed)?,
-        );
+        let sequence = u32::from_be_bytes([encoded[0], encoded[1], encoded[2], encoded[3]]);
+        let timestamp = u64::from_be_bytes([
+            encoded[4],
+            encoded[5],
+            encoded[6],
+            encoded[7],
+            encoded[8],
+            encoded[9],
+            encoded[10],
+            encoded[11],
+        ]);
 
         Ok(Self {
             sequence,

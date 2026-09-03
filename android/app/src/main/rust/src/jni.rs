@@ -5,7 +5,7 @@ use std::{
 };
 
 use arc_swap::ArcSwapOption;
-use audio_stream_audio_common::{CHANNELS, SAMPLE_RATE};
+use audio_stream_protocol::{CHANNELS, SAMPLE_RATE};
 use jni::{
     EnvUnowned,
     errors::ThrowRuntimeExAndDefault,
@@ -13,12 +13,10 @@ use jni::{
     sys::{jboolean, jint, jlong},
 };
 use tokio::{runtime::Runtime, task::JoinHandle};
-use tokio_util::sync::CancellationToken;
 
 use crate::{
     client,
     error::ClientError,
-    player::fill_audio_track,
     ring_buffer::{PCM_RING_CAPACITY_SAMPLES, PcmRingBuffer},
     state::{ClientState, SharedState},
 };
@@ -33,7 +31,6 @@ struct NativeEngine {
 }
 
 struct Session {
-    stop: CancellationToken,
     task: JoinHandle<()>,
     ring: Arc<PcmRingBuffer>,
 }
@@ -42,7 +39,7 @@ fn engine_slot() -> &'static Mutex<Option<NativeEngine>> {
     ENGINE.get_or_init(|| Mutex::new(None))
 }
 
-pub fn initialize() -> Result<(), ClientError> {
+fn initialize() -> Result<(), ClientError> {
     let mut slot = engine_slot()
         .lock()
         .map_err(|_| ClientError::Runtime("native engine lock was poisoned".to_owned()))?;
@@ -75,7 +72,6 @@ pub fn connect(host: &str, port: u16, fingerprint_text: &str) -> Result<(), Clie
         .as_mut()
         .ok_or_else(|| ClientError::Runtime("native engine was not initialized".to_owned()))?;
     if let Some(previous) = engine.session.take() {
-        previous.stop.cancel();
         previous.task.abort();
         previous.ring.clear();
     }
@@ -83,15 +79,13 @@ pub fn connect(host: &str, port: u16, fingerprint_text: &str) -> Result<(), Clie
     let ring = Arc::new(PcmRingBuffer::new(PCM_RING_CAPACITY_SAMPLES));
     ACTIVE_RING.store(Some(ring.clone()));
     engine.state.begin_connecting();
-    let stop = CancellationToken::new();
     let task = engine.runtime.spawn(client::run_session(
         address,
         fingerprint,
         ring.clone(),
         engine.state.clone(),
-        stop.clone(),
     ));
-    engine.session = Some(Session { stop, task, ring });
+    engine.session = Some(Session { task, ring });
     drop(slot);
     Ok(())
 }
@@ -104,7 +98,6 @@ pub fn disconnect() {
         return;
     };
     if let Some(session) = engine.session.take() {
-        session.stop.cancel();
         session.task.abort();
         session.ring.clear();
     }
@@ -121,7 +114,6 @@ pub fn shutdown() {
         return;
     };
     if let Some(session) = engine.session.take() {
-        session.stop.cancel();
         session.task.abort();
         session.ring.clear();
     }
@@ -129,8 +121,12 @@ pub fn shutdown() {
 }
 
 pub fn read_pcm(output: &mut [i16]) -> usize {
-    let ring = ACTIVE_RING.load_full();
-    fill_audio_track(ring.as_deref(), output)
+    if let Some(ring) = ACTIVE_RING.load_full() {
+        ring.read_into(output)
+    } else {
+        output.fill(0);
+        0
+    }
 }
 
 pub fn state() -> ClientState {
@@ -161,18 +157,8 @@ pub fn late_packets() -> u64 {
     with_state(super::state::SharedState::late_packets)
 }
 
-pub fn invalid_packets() -> u64 {
-    with_state(super::state::SharedState::invalid_packets)
-}
-
 pub fn underruns() -> u64 {
     ACTIVE_RING.load_full().map_or(0, |ring| ring.underruns())
-}
-
-pub fn overwritten_samples() -> u64 {
-    ACTIVE_RING
-        .load_full()
-        .map_or(0, |ring| ring.overwritten_samples())
 }
 
 pub fn buffer_duration_ms() -> u64 {
@@ -226,16 +212,6 @@ fn record_connect_error(error: &ClientError) {
             engine.state.set_error(error);
         }
     }
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_com_example_audiostream_NativeBridge_nativeInit<'local>(
-    mut unowned_env: EnvUnowned<'local>,
-    _class: JClass<'local>,
-) -> jboolean {
-    unowned_env
-        .with_env(|_| -> jni::errors::Result<jboolean> { Ok(initialize().is_ok() as jboolean) })
-        .resolve::<ThrowRuntimeExAndDefault>()
 }
 
 #[unsafe(no_mangle)]
@@ -377,28 +353,6 @@ pub extern "system" fn Java_com_example_audiostream_NativeBridge_nativeGetUnderr
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_example_audiostream_NativeBridge_nativeGetInvalidPackets<'local>(
-    mut unowned_env: EnvUnowned<'local>,
-    _class: JClass<'local>,
-) -> jlong {
-    unowned_env
-        .with_env(|_| -> jni::errors::Result<jlong> { Ok(to_jlong(invalid_packets())) })
-        .resolve::<ThrowRuntimeExAndDefault>()
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_com_example_audiostream_NativeBridge_nativeGetOverwrittenSamples<
-    'local,
->(
-    mut unowned_env: EnvUnowned<'local>,
-    _class: JClass<'local>,
-) -> jlong {
-    unowned_env
-        .with_env(|_| -> jni::errors::Result<jlong> { Ok(to_jlong(overwritten_samples())) })
-        .resolve::<ThrowRuntimeExAndDefault>()
-}
-
-#[unsafe(no_mangle)]
 pub extern "system" fn Java_com_example_audiostream_NativeBridge_nativeGetLastError<'local>(
     mut unowned_env: EnvUnowned<'local>,
     _class: JClass<'local>,
@@ -423,15 +377,5 @@ pub extern "system" fn Java_com_example_audiostream_NativeBridge_nativeReadPcm<'
             let samples = jint::try_from(read_pcm(&mut elements)).unwrap_or(jint::MAX);
             Ok(samples)
         })
-        .resolve::<ThrowRuntimeExAndDefault>()
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_com_example_audiostream_NativeBridge_nativeVersion<'local>(
-    mut unowned_env: EnvUnowned<'local>,
-    _class: JClass<'local>,
-) -> JString<'local> {
-    unowned_env
-        .with_env(|env| JString::from_str(env, env!("CARGO_PKG_VERSION")))
         .resolve::<ThrowRuntimeExAndDefault>()
 }

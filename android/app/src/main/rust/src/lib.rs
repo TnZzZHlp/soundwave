@@ -7,8 +7,6 @@ mod client;
 mod error;
 mod jitter;
 mod jni;
-mod packet;
-mod player;
 mod receiver;
 mod ring_buffer;
 mod state;

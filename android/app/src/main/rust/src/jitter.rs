@@ -12,26 +12,22 @@ pub enum JitterOutput {
 
 pub struct JitterBuffer {
     expected_sequence: Option<u32>,
-    expected_timestamp: Option<u64>,
     packets: BTreeMap<u32, AudioPacket>,
     target_packets: usize,
     max_packets: usize,
-    frame_samples_per_channel: u64,
     started: bool,
     lost_packets: u64,
     late_packets: u64,
 }
 
 impl JitterBuffer {
-    pub fn new(target_packets: usize, frame_samples_per_channel: u64) -> Self {
+    pub fn new(target_packets: usize) -> Self {
         let target_packets = target_packets.max(1);
         Self {
             expected_sequence: None,
-            expected_timestamp: None,
             packets: BTreeMap::new(),
             target_packets,
             max_packets: target_packets.saturating_mul(3).max(4),
-            frame_samples_per_channel,
             started: false,
             lost_packets: 0,
             late_packets: 0,
@@ -97,11 +93,6 @@ impl JitterBuffer {
         while let Some(expected) = self.expected_sequence {
             if let Some(packet) = self.packets.remove(&expected) {
                 self.expected_sequence = Some(expected.wrapping_add(1));
-                self.expected_timestamp = Some(
-                    packet
-                        .timestamp
-                        .wrapping_add(self.frame_samples_per_channel),
-                );
                 output.push(JitterOutput::Audio(packet));
                 continue;
             }
@@ -116,18 +107,12 @@ impl JitterBuffer {
                 // allocating one silence item per missing sequence.
                 self.lost_packets = self.lost_packets.saturating_add(u64::from(missing));
                 self.expected_sequence = Some(next_sequence);
-                self.expected_timestamp = self
-                    .packets
-                    .get(&next_sequence)
-                    .map(|packet| packet.timestamp);
                 continue;
             }
             if self.packets.len() < self.target_packets && self.packets.len() < self.max_packets {
                 break;
             }
 
-            let timestamp = self.expected_timestamp.unwrap_or(0);
-            self.expected_timestamp = Some(timestamp.wrapping_add(self.frame_samples_per_channel));
             self.expected_sequence = Some(expected.wrapping_add(1));
             self.lost_packets = self.lost_packets.saturating_add(1);
             output.push(JitterOutput::Silence);
@@ -180,7 +165,7 @@ mod tests {
 
     #[test]
     fn duplicate_copy_while_buffered_is_ignored() {
-        let mut jitter = JitterBuffer::new(2, 480);
+        let mut jitter = JitterBuffer::new(2);
         let _ = jitter.push(packet(1));
         let _ = jitter.push(packet(1)); // duplicate, still buffered
         assert_eq!(jitter.late_packets(), 0);
@@ -191,7 +176,7 @@ mod tests {
 
     #[test]
     fn handles_minor_reordering() {
-        let mut jitter = JitterBuffer::new(2, 480);
+        let mut jitter = JitterBuffer::new(2);
         assert_eq!(sequences(jitter.push(packet(1))), Vec::<u32>::new());
         assert_eq!(sequences(jitter.push(packet(2))), vec![1, 2]);
         assert_eq!(sequences(jitter.push(packet(4))), Vec::<u32>::new());
@@ -201,7 +186,7 @@ mod tests {
 
     #[test]
     fn increases_target_until_cap() {
-        let mut jitter = JitterBuffer::new(2, 480);
+        let mut jitter = JitterBuffer::new(2);
         assert_eq!(jitter.target_packets(), 2);
         assert!(jitter.increase_target(2, 5));
         assert_eq!(jitter.target_packets(), 4);
@@ -213,7 +198,7 @@ mod tests {
 
     #[test]
     fn converts_missing_packet_to_silence() {
-        let mut jitter = JitterBuffer::new(2, 480);
+        let mut jitter = JitterBuffer::new(2);
         let _ = jitter.push(packet(1));
         assert_eq!(sequences(jitter.push(packet(2))), vec![1, 2]);
         let _ = jitter.push(packet(4));
@@ -223,7 +208,7 @@ mod tests {
 
     #[test]
     fn resynchronizes_after_far_gap_without_unbounded_silence() {
-        let mut jitter = JitterBuffer::new(2, 480);
+        let mut jitter = JitterBuffer::new(2);
         let _ = jitter.push(packet(0));
         assert_eq!(sequences(jitter.push(packet(1))), vec![0, 1]);
 

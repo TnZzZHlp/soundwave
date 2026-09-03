@@ -13,7 +13,7 @@ pub use config::{
 pub use control::{ControlReader, ControlWriter, MAX_CONTROL_MESSAGE_BYTES};
 pub use datagram::{DatagramReceiver, DatagramSender};
 pub use error::TransportError;
-pub use pairing::{PAIRING_URI_AUTHORITY, PAIRING_URI_PATH, PAIRING_URI_SCHEME, PairingUri};
+pub use pairing::encode_pairing_uri;
 
 #[cfg(test)]
 mod tests {

@@ -8,5 +8,7 @@ mod control;
 mod error;
 
 pub use audio::{AUDIO_PACKET_HEADER_LEN, AudioPacket};
-pub use control::{ControlMessage, PROTOCOL_VERSION, SampleFormat, StreamInfo};
+pub use control::{
+    CHANNELS, ControlMessage, PROTOCOL_VERSION, SAMPLE_RATE, SampleFormat, StreamInfo,
+};
 pub use error::{ControlError, PacketError};

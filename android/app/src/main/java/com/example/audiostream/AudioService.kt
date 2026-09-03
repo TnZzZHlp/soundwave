@@ -75,7 +75,6 @@ class AudioService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        NativeBridge.nativeInit()
         NotificationHelper.createChannel(this)
     }
 

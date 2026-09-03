@@ -12,7 +12,6 @@ object NativeBridge {
         System.loadLibrary("soundwave_native")
     }
 
-    external fun nativeInit(): Boolean
     external fun nativeConnect(host: String, port: Int, fingerprint: String): Boolean
     external fun nativeDisconnect()
     external fun nativeShutdown()
@@ -23,10 +22,7 @@ object NativeBridge {
     external fun nativeGetReceivedPackets(): Long
     external fun nativeGetLostPackets(): Long
     external fun nativeGetLatePackets(): Long
-    external fun nativeGetInvalidPackets(): Long
     external fun nativeGetUnderruns(): Long
-    external fun nativeGetOverwrittenSamples(): Long
     external fun nativeGetLastError(): String
     external fun nativeReadPcm(output: ShortArray): Int
-    external fun nativeVersion(): String
 }

@@ -7,9 +7,8 @@ use std::{
 };
 
 use anyhow::Context;
-use audio_stream_audio_common::{CHANNELS, SAMPLE_RATE};
 use audio_stream_protocol::{
-    AudioPacket, ControlMessage, PROTOCOL_VERSION, SampleFormat, StreamInfo,
+    AudioPacket, CHANNELS, ControlMessage, PROTOCOL_VERSION, SAMPLE_RATE, SampleFormat, StreamInfo,
 };
 use audio_stream_transport::{ControlReader, ControlWriter, DatagramSender, TransportError};
 use bytes::Bytes;
@@ -342,12 +341,6 @@ pub async fn process_control_messages(
                 Ok(ControlMessage::Stop) => {
                     debug!("client requested stream stop");
                     break;
-                }
-                Ok(ControlMessage::Ping { timestamp }) => {
-                    if let Err(error) = writer.send(&ControlMessage::Pong { timestamp }).await {
-                        warn!(%error, "failed to send control pong");
-                        break;
-                    }
                 }
                 Ok(message) => debug!(?message, "ignoring unexpected client control message"),
                 Err(error) => {

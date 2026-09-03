@@ -12,14 +12,12 @@ use std::{
     thread,
 };
 
-mod qr;
-
 use anyhow::{Context, Result};
+use qrcodegen::{QrCode, QrCodeEcc};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::{network::server::AudioTransmissionGate, pairing::PairingInfo};
-use qr::QrMatrix;
 use windows::{
     Win32::{
         Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
@@ -107,7 +105,7 @@ struct UiContext {
     volume_adjustment: Arc<AtomicI32>,
     receiver: Receiver<UiCommand>,
     status_label: Option<HWND>,
-    qr_matrix: Option<QrMatrix>,
+    qr_matrix: Option<QrCode>,
 }
 
 #[derive(Clone, Copy)]
@@ -343,7 +341,9 @@ fn prepare_pairing_qr() {
         return;
     };
 
-    match QrMatrix::encode(&payload) {
+    match QrCode::encode_text(&payload, QrCodeEcc::Medium)
+        .map_err(|error| format!("QR encoding failed: {error:?}"))
+    {
         Ok(matrix) => UI_CONTEXT.with(|context| {
             if let Some(context) = context.borrow_mut().as_mut() {
                 context.qr_matrix = Some(matrix);
@@ -439,7 +439,7 @@ fn paint_pairing_qr(hwnd: HWND) {
 fn render_qr_matrix(
     device_context: windows::Win32::Graphics::Gdi::HDC,
     client: RECT,
-    matrix: &QrMatrix,
+    matrix: &QrCode,
 ) {
     const PANEL_LEFT: i32 = 410;
     const PANEL_TOP: i32 = 95;
@@ -478,7 +478,7 @@ fn render_qr_matrix(
 
     for y in 0..matrix.size() {
         for x in 0..matrix.size() {
-            if !matrix.is_dark(x, y) {
+            if !matrix.get_module(x, y) {
                 continue;
             }
             let left = origin_x + (x + QUIET_ZONE_MODULES) * module_size;

@@ -4,8 +4,6 @@ use thiserror::Error;
 pub enum PacketError {
     #[error("audio packet is {actual} bytes, but needs at least {minimum} bytes")]
     TooShort { actual: usize, minimum: usize },
-    #[error("audio packet header is malformed")]
-    Malformed,
 }
 
 #[derive(Debug, Error)]

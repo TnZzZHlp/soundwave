@@ -1,11 +1,10 @@
 use std::sync::Arc;
 
-use audio_stream_protocol::{AudioPacket, StreamInfo};
+use audio_stream_protocol::{AudioPacket, CHANNELS, SAMPLE_RATE, SampleFormat, StreamInfo};
 
 use crate::{
     error::ClientError,
     jitter::{JitterBuffer, JitterOutput},
-    packet::pcm_packet_layout,
     ring_buffer::PcmRingBuffer,
     state::SharedState,
 };
@@ -34,7 +33,25 @@ impl ReceiverPipeline {
         ring: Arc<PcmRingBuffer>,
         state: Arc<SharedState>,
     ) -> Result<Self, ClientError> {
-        let layout = pcm_packet_layout(stream)?;
+        if stream.sample_rate != SAMPLE_RATE
+            || stream.channels != CHANNELS
+            || stream.sample_format != SampleFormat::I16Le
+            || stream.frame_duration_ms == 0
+        {
+            return Err(ClientError::UnsupportedStream(format!(
+                "expected 48000 Hz stereo i16, received {stream:?}"
+            )));
+        }
+        let samples_per_channel = (SAMPLE_RATE as usize)
+            .checked_mul(stream.frame_duration_ms as usize)
+            .ok_or_else(|| ClientError::UnsupportedStream("frame size overflow".to_owned()))?;
+        if samples_per_channel % 1_000 != 0 {
+            return Err(ClientError::UnsupportedStream(
+                "frame duration does not align to 48 kHz samples".to_owned(),
+            ));
+        }
+        let samples_per_packet = samples_per_channel / 1_000 * CHANNELS as usize;
+        let expected_packet_bytes = samples_per_packet * std::mem::size_of::<i16>();
         let target_packets =
             packets_for_duration(INITIAL_JITTER_BUFFER_MS, stream.frame_duration_ms)?;
         let adjustment_packets =
@@ -50,11 +67,11 @@ impl ReceiverPipeline {
         let last_underruns = ring.underruns();
 
         Ok(Self {
-            jitter: JitterBuffer::new(target_packets, layout.samples_per_channel),
+            jitter: JitterBuffer::new(target_packets),
             ring,
             state,
-            expected_packet_bytes: layout.expected_packet_bytes,
-            samples_per_packet: layout.samples_per_packet,
+            expected_packet_bytes,
+            samples_per_packet,
             frame_duration_ms,
             adjustment_packets,
             maximum_target_packets,
@@ -67,7 +84,6 @@ impl ReceiverPipeline {
     pub fn handle_packet(&mut self, packet: AudioPacket) {
         self.state.add_received();
         if packet.payload.len() != self.expected_packet_bytes {
-            self.state.add_invalid();
             return;
         }
 
@@ -78,11 +94,7 @@ impl ReceiverPipeline {
         let late_before = self.jitter.late_packets();
         for output in self.jitter.push(packet) {
             match output {
-                JitterOutput::Audio(packet) => {
-                    if !self.ring.write_pcm_le(&packet.payload) {
-                        self.state.add_invalid();
-                    }
-                }
+                JitterOutput::Audio(packet) => self.ring.write_pcm_le(&packet.payload),
                 JitterOutput::Silence => self.ring.write_silence(self.samples_per_packet),
             }
         }
@@ -124,7 +136,6 @@ fn packets_for_duration(duration_ms: usize, frame_duration_ms: u8) -> Result<usi
 
 #[cfg(test)]
 mod tests {
-    use audio_stream_protocol::{SampleFormat, StreamInfo};
     use bytes::Bytes;
 
     use super::*;
