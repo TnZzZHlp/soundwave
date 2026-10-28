@@ -1,7 +1,7 @@
 use std::{
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering},
+        atomic::{AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -19,38 +19,13 @@ use tracing::{debug, warn};
 
 use crate::audio::PcmBlock;
 
+use super::{silence::SilenceDetector, volume::VolumeAdjustment};
+
 /// One 10 ms frame keeps a transient sender stall from turning into audible
 /// queueing delay; capture evicts it before enqueueing newer audio.
 pub const FRAME_QUEUE_CAPACITY: usize = 1;
 
-/// Shared switch controlling whether captured PCM is sent to the connected client.
-///
-/// Disabling the switch keeps the QUIC control connection alive while the sender
-/// drains and discards capture blocks, preserving bounded latency for a later
-/// re-enable.
-#[derive(Clone)]
-pub struct AudioTransmissionGate {
-    enabled: Arc<AtomicBool>,
-}
-
-impl AudioTransmissionGate {
-    /// Creates a gate that allows audio transmission.
-    pub fn enabled() -> Self {
-        Self {
-            enabled: Arc::new(AtomicBool::new(true)),
-        }
-    }
-
-    /// Returns whether new PCM datagrams may be sent.
-    pub fn is_enabled(&self) -> bool {
-        self.enabled.load(Ordering::SeqCst)
-    }
-
-    /// Enables or disables new PCM datagram transmission.
-    pub fn set_enabled(&self, enabled: bool) {
-        self.enabled.store(enabled, Ordering::SeqCst);
-    }
-}
+pub use crate::audio::transmission::AudioTransmissionGate;
 
 #[derive(Default)]
 pub struct StreamCounters {
@@ -116,6 +91,7 @@ pub fn spawn_datagram_sender(
     stop: CancellationToken,
     counters: Arc<StreamCounters>,
     transmission: AudioTransmissionGate,
+    activity: tokio::sync::mpsc::Sender<ControlMessage>,
 ) -> std::io::Result<std::thread::JoinHandle<Result<(), TransportError>>> {
     std::thread::Builder::new()
         .name("quic-audio-send".to_owned())
@@ -128,12 +104,47 @@ pub fn spawn_datagram_sender(
                 }
             };
             let mut packetizer = Packetizer::new(frame_duration_ms);
+            let mut silence = SilenceDetector::new();
             let result = loop {
                 if stop.is_cancelled() {
                     break Ok(());
                 }
+                if !transmission.is_enabled() {
+                    let (_, became_idle) = silence.update(0, true, false);
+                    packetizer.pending_tail = None;
+                    if became_idle
+                        && activity
+                            .blocking_send(ControlMessage::AudioIdle {
+                                next_sequence: packetizer.sequence,
+                            })
+                            .is_err()
+                    {
+                        break Ok(());
+                    }
+                    transmission.wait_until_enabled(&stop);
+                    continue;
+                }
                 match frames.recv_timeout(Duration::from_millis(100)) {
                     Ok(block) => {
+                        let (send, became_idle) = silence.update(
+                            block.timestamp,
+                            block.samples.iter().all(|&sample| sample == 0),
+                            transmission.is_enabled(),
+                        );
+                        if became_idle {
+                            packetizer.pending_tail = None;
+                            if activity
+                                .blocking_send(ControlMessage::AudioIdle {
+                                    next_sequence: packetizer.sequence,
+                                })
+                                .is_err()
+                            {
+                                break Ok(());
+                            }
+                        }
+                        if !send {
+                            continue;
+                        }
                         match packetizer.send_block(&sender, block, &counters, &transmission) {
                             Ok(()) => {}
                             Err(error) => break Err(error),
@@ -318,17 +329,21 @@ pub async fn process_control_messages(
     writer: &mut ControlWriter,
     connection: &Connection,
     stop: &CancellationToken,
-    volume_adjustment: Arc<AtomicI32>,
+    volume_adjustment: Arc<VolumeAdjustment>,
+    mut activity: tokio::sync::mpsc::Receiver<ControlMessage>,
 ) {
-    let mut volume_updates = tokio::time::interval(Duration::from_millis(50));
-    volume_updates.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
     loop {
         tokio::select! {
             _ = stop.cancelled() => break,
             _ = connection.closed() => break,
-            _ = volume_updates.tick() => {
-                let steps = volume_adjustment.swap(0, Ordering::AcqRel);
+            Some(message) = activity.recv() => {
+                if let Err(error) = writer.send(&message).await {
+                    warn!(%error, "failed to send audio activity");
+                    break;
+                }
+            }
+            _ = volume_adjustment.changed() => {
+                let steps = volume_adjustment.take();
                 if steps != 0 {
                     let steps = steps.clamp(i32::from(i8::MIN), i32::from(i8::MAX)) as i8;
                     if let Err(error) = writer.send(&ControlMessage::AdjustVolume { steps }).await {

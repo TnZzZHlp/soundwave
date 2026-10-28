@@ -117,6 +117,7 @@ pub fn shutdown() {
         session.task.abort();
         session.ring.clear();
     }
+    engine.state.set(ClientState::Disconnected);
     engine.runtime.shutdown_timeout(Duration::from_millis(500));
 }
 
@@ -283,6 +284,41 @@ pub extern "system" fn Java_com_example_audiostream_NativeBridge_nativeGetState<
 ) -> jint {
     unowned_env
         .with_env(|_| -> jni::errors::Result<jint> { Ok(state() as jint) })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_example_audiostream_NativeBridge_nativeIsAudioActive<'local>(
+    mut unowned_env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+) -> jboolean {
+    unowned_env
+        .with_env(|_| -> jni::errors::Result<jboolean> {
+            Ok(engine_slot()
+                .lock()
+                .ok()
+                .and_then(|slot| slot.as_ref().map(|engine| engine.state.audio_active()))
+                .unwrap_or(false))
+        })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_example_audiostream_NativeBridge_nativeWaitForUpdate<'local>(
+    mut unowned_env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    previous: jlong,
+) -> jlong {
+    unowned_env
+        .with_env(|_| -> jni::errors::Result<jlong> {
+            let state = engine_slot()
+                .lock()
+                .ok()
+                .and_then(|slot| slot.as_ref().map(|engine| engine.state.clone()));
+            Ok(state.map_or(previous, |state| {
+                to_jlong(state.wait_for_update(u64::try_from(previous).unwrap_or(u64::MAX)))
+            }))
+        })
         .resolve::<ThrowRuntimeExAndDefault>()
 }
 

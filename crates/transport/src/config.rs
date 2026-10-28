@@ -82,6 +82,7 @@ fn server_config_from_der(
     let certificate = CertificateDer::from(certificate_der.clone());
     let mut transport = TransportConfig::default();
     transport.datagram_send_buffer_size(REALTIME_DATAGRAM_BUFFER_BYTES);
+    transport.keep_alive_interval(Some(std::time::Duration::from_secs(15)));
     let mut server_config = ServerConfig::with_single_cert(vec![certificate], private_key)
         .map_err(|error| TransportError::Certificate(error.to_string()))?;
     server_config.transport_config(Arc::new(transport));

@@ -100,23 +100,51 @@ async fn connected_loop(
     let stream = expect_stream_info(&mut reader).await?;
     expect_start(&mut reader).await?;
 
-    let mut pipeline = ReceiverPipeline::new(stream, ring, state.clone())?;
+    let mut pipeline = ReceiverPipeline::new(stream, ring.clone(), state.clone())?;
+    let mut newest_sequence = None;
+    let mut idle_boundary = None;
+    let mut idle_deadline = None;
     let datagrams = DatagramReceiver::new(connection.clone())?;
     state.set(ClientState::Connected);
 
     loop {
         tokio::select! {
             _ = connection.closed() => return Ok(()),
+            _ = tokio::time::sleep_until(idle_deadline.unwrap_or_else(tokio::time::Instant::now)), if idle_deadline.is_some() => {
+                idle_deadline = None;
+                state.set_audio_active(false);
+            }
             packet = datagrams.receive() => {
                 let packet = packet?;
+                if let Some(boundary) = idle_boundary {
+                    if !sequence_before(packet.sequence, boundary) {
+                        pipeline.resume(boundary);
+                        idle_boundary = None;
+                        idle_deadline = None;
+                    }
+                }
+                let sequence = packet.sequence;
                 state.set_rtt_ms(
                     u64::try_from(connection.rtt().as_millis()).unwrap_or(u64::MAX),
                 );
-                pipeline.handle_packet(packet);
+                if pipeline.handle_packet(packet) {
+                    if newest_sequence.is_none_or(|newest| !sequence_before(sequence, newest)) {
+                        newest_sequence = Some(sequence);
+                    }
+                    if idle_boundary.is_none() {
+                        state.set_audio_active(true);
+                    }
+                }
             }
             message = reader.receive() => {
                 match message? {
                     ControlMessage::Stop => return Ok(()),
+                    ControlMessage::AudioIdle { next_sequence } => {
+                        if newest_sequence.is_none_or(|newest| sequence_before(newest, next_sequence)) {
+                            idle_boundary = Some(next_sequence);
+                            idle_deadline = Some(tokio::time::Instant::now() + Duration::from_millis(150));
+                        }
+                    }
                     ControlMessage::AdjustVolume { steps } => {
                         state.add_volume_adjustment(steps);
                     }
@@ -125,6 +153,11 @@ async fn connected_loop(
             }
         }
     }
+}
+
+fn sequence_before(sequence: u32, reference: u32) -> bool {
+    let distance = sequence.wrapping_sub(reference);
+    distance != 0 && distance >= (1_u32 << 31)
 }
 
 async fn expect_hello(reader: &mut ControlReader) -> Result<(), ClientError> {
@@ -179,6 +212,107 @@ mod tests {
         assert_eq!(retry_delay(4), Duration::from_secs(10));
         assert_eq!(retry_delay(5), Duration::from_secs(10));
         assert_eq!(retry_delay(u32::MAX), Duration::from_secs(10));
+    }
+
+    #[tokio::test]
+    async fn idle_connection_resumes_reordered_audio_without_losing_first_packet() {
+        let (config, identity) = make_server_config().unwrap();
+        let server = Endpoint::server(config, "127.0.0.1:0".parse().unwrap()).unwrap();
+        let ring = Arc::new(PcmRingBuffer::new(PCM_RING_CAPACITY_SAMPLES));
+        let state = Arc::new(SharedState::default());
+        let client = tokio::spawn(run_session(
+            server.local_addr().unwrap(),
+            identity.sha256_fingerprint,
+            ring.clone(),
+            state.clone(),
+        ));
+        let connection = server.accept().await.unwrap().await.unwrap();
+        let (send, recv) = connection.accept_bi().await.unwrap();
+        let mut writer = ControlWriter::new(send);
+        let mut reader = ControlReader::new(recv);
+        assert_eq!(
+            reader.receive().await.unwrap(),
+            ControlMessage::Hello {
+                protocol_version: PROTOCOL_VERSION,
+            }
+        );
+        for message in [
+            ControlMessage::Hello {
+                protocol_version: PROTOCOL_VERSION,
+            },
+            ControlMessage::StreamInfo(StreamInfo {
+                sample_rate: 48_000,
+                channels: 2,
+                sample_format: SampleFormat::I16Le,
+                frame_duration_ms: 5,
+            }),
+            ControlMessage::Start,
+        ] {
+            writer.send(&message).await.unwrap();
+        }
+        let sender = DatagramSender::new(connection.clone()).unwrap();
+        for sequence in 0..6 {
+            sender
+                .send(&audio_stream_protocol::AudioPacket::new(
+                    sequence,
+                    u64::from(sequence) * 240,
+                    vec![0; 960],
+                ))
+                .unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while state.received_packets() < 6 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(state.audio_active());
+        writer
+            .send(&ControlMessage::AudioIdle { next_sequence: 6 })
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while state.audio_active() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(state.state(), ClientState::Connected);
+
+        for sequence in [5, 7, 6, 8, 9] {
+            let payload: Vec<u8> = std::iter::repeat_n((sequence as i16 + 1).to_le_bytes(), 480)
+                .flatten()
+                .collect();
+            sender
+                .send(&audio_stream_protocol::AudioPacket::new(
+                    sequence,
+                    u64::from(sequence) * 240,
+                    payload,
+                ))
+                .unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !state.audio_active() || ring.available_samples() != 1_920 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let mut first_packet = [0; 480];
+        assert_eq!(ring.read_into(&mut first_packet), 480);
+        assert_eq!(first_packet, [7; 480]);
+
+        writer
+            .send(&ControlMessage::AudioIdle { next_sequence: 6 })
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(state.audio_active());
+        assert_eq!(state.lost_packets(), 0);
+        client.abort();
+        assert!(client.await.unwrap_err().is_cancelled());
     }
 
     #[tokio::test]

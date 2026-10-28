@@ -34,6 +34,12 @@ impl JitterBuffer {
         }
     }
 
+    pub fn restart(&mut self, next_sequence: u32) {
+        self.packets.clear();
+        self.expected_sequence = Some(next_sequence);
+        self.started = false;
+    }
+
     pub fn push(&mut self, packet: AudioPacket) -> Vec<JitterOutput> {
         let expected = self.expected_sequence.get_or_insert(packet.sequence);
         if self.packets.contains_key(&packet.sequence) {

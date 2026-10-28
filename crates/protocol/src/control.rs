@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ControlError;
 
-pub const PROTOCOL_VERSION: u16 = 5;
+pub const PROTOCOL_VERSION: u16 = 6;
 pub const SAMPLE_RATE: u32 = 48_000;
 pub const CHANNELS: u8 = 2;
 
@@ -29,6 +29,7 @@ pub enum ControlMessage {
     Start,
     Stop,
     AdjustVolume { steps: i8 },
+    AudioIdle { next_sequence: u32 },
 }
 
 impl ControlMessage {

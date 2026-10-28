@@ -1,6 +1,6 @@
 use std::sync::{
     Arc,
-    atomic::{AtomicI32, AtomicU64, Ordering},
+    atomic::{AtomicU64, Ordering},
 };
 
 use anyhow::Context;
@@ -12,7 +12,10 @@ use tracing::{info, warn};
 use crate::{
     audio::{capture::spawn_loopback_capture, device::default_render_device_info},
     config::{ServerArgs, default_identity_dir},
-    network::server::{self, AudioTransmissionGate, FRAME_QUEUE_CAPACITY, StreamCounters},
+    network::{
+        server::{self, AudioTransmissionGate, FRAME_QUEUE_CAPACITY, StreamCounters},
+        volume::VolumeAdjustment,
+    },
     pairing,
     ui::{ServerUi, ServerUiInfo, ServerUiReporter},
 };
@@ -26,7 +29,7 @@ pub async fn run(args: ServerArgs) -> anyhow::Result<()> {
         .unwrap_or_else(default_identity_dir);
     let (server_config, identity) =
         audio_stream_transport::load_or_create_server_config(&identity_dir)?;
-    let volume_adjustment = Arc::new(AtomicI32::new(0));
+    let volume_adjustment = Arc::new(VolumeAdjustment::default());
     let endpoint = Endpoint::server(server_config, args.bind)
         .with_context(|| format!("could not bind QUIC UDP socket at {}", args.bind))?;
     let endpoint_address = endpoint
@@ -130,22 +133,24 @@ async fn serve_client(
     server_shutdown: CancellationToken,
     ui: Option<&ServerUiReporter>,
     transmission: AudioTransmissionGate,
-    volume_adjustment: Arc<AtomicI32>,
+    volume_adjustment: Arc<VolumeAdjustment>,
 ) -> anyhow::Result<()> {
     let peer = connection.remote_address();
     let session_stop = server_shutdown.child_token();
-    volume_adjustment.store(0, Ordering::Release);
+    volume_adjustment.take();
     let (mut control_writer, mut control_reader, frame_duration_ms) =
         server::perform_handshake(&connection, &session_stop).await?;
 
     let (frame_sender, frame_receiver) = bounded(FRAME_QUEUE_CAPACITY);
     let counters = Arc::new(StreamCounters::default());
+    let (activity_sender, activity_receiver) = tokio::sync::mpsc::channel(8);
     let capture_dropped = Arc::new(AtomicU64::new(0));
     let capture = spawn_loopback_capture(
         frame_sender,
         frame_receiver.clone(),
         session_stop.clone(),
         capture_dropped.clone(),
+        transmission.clone(),
     )
     .context("could not start WASAPI loopback thread")?;
     let network = server::spawn_datagram_sender(
@@ -155,6 +160,7 @@ async fn serve_client(
         session_stop.clone(),
         counters.clone(),
         transmission,
+        activity_sender,
     )
     .context("could not start QUIC packet thread")?;
 
@@ -168,6 +174,7 @@ async fn serve_client(
         &connection,
         &session_stop,
         volume_adjustment,
+        activity_receiver,
     )
     .await;
 

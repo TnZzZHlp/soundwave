@@ -16,6 +16,8 @@ object NativeBridge {
     external fun nativeDisconnect()
     external fun nativeShutdown()
     external fun nativeGetState(): Int
+    external fun nativeIsAudioActive(): Boolean
+    external fun nativeWaitForUpdate(previous: Long): Long
     external fun nativeGetLatencyMs(): Long
     external fun nativeGetBufferMs(): Long
     external fun nativeGetJitterBufferMs(): Long

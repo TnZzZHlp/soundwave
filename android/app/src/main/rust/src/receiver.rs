@@ -83,10 +83,18 @@ impl ReceiverPipeline {
         })
     }
 
-    pub fn handle_packet(&mut self, packet: AudioPacket) {
+    pub fn resume(&mut self, next_sequence: u32) {
+        self.jitter.restart(next_sequence);
+        self.ring.clear();
+        self.ring.begin_buffering();
+        self.last_underruns = self.ring.underruns();
+        self.adaptation_cooldown_packets = self.cooldown_after_adjustment_packets;
+    }
+
+    pub fn handle_packet(&mut self, packet: AudioPacket) -> bool {
         self.state.add_received();
         if packet.payload.len() != self.expected_packet_bytes {
-            return;
+            return false;
         }
 
         let underruns = self.ring.underruns();
@@ -106,6 +114,7 @@ impl ReceiverPipeline {
         self.state
             .add_late(late_packets.saturating_sub(late_before));
         self.adjust_jitter_after_stutter(underrun_detected || late_packets > late_before);
+        true
     }
 
     fn adjust_jitter_after_stutter(&mut self, stutter_detected: bool) {

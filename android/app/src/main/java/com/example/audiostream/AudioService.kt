@@ -30,8 +30,6 @@ class AudioService : Service() {
         private const val PLAYBACK_CHUNK_FRAMES = SAMPLE_RATE / 200
         private const val AUDIO_BUFFER_FRAMES = PLAYBACK_CHUNK_FRAMES * 2
         private const val FRAME_SAMPLES = PLAYBACK_CHUNK_FRAMES * CHANNELS
-        private const val STARTUP_POLL_MS = 10L
-        private const val CONNECTED_POLL_MS = 100L
     }
 
     @Volatile private var playbackRunning = false
@@ -43,33 +41,42 @@ class AudioService : Service() {
     private var lastNotifiedState = Int.MIN_VALUE
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    private val statusUpdater = object : Runnable {
-        override fun run() {
-            val state = NativeBridge.nativeGetState()
-            val text = when (state) {
-                NativeBridge.STATE_CONNECTING -> "Connecting to $currentServer"
-                NativeBridge.STATE_CONNECTED -> "Connected to $currentServer"
-                NativeBridge.STATE_ERROR -> "Connection lost — retrying"
-                NativeBridge.STATE_DISCONNECTED -> "Disconnected"
-                else -> "Preparing audio stream"
-            }
-            if (state != lastNotifiedState) {
-                getSystemService(NotificationManager::class.java)
-                    .notify(NotificationHelper.NOTIFICATION_ID, NotificationHelper.build(this@AudioService, text))
-                lastNotifiedState = state
-            }
-            syncStreamingResources(state)
-            if (reconnectRequested) {
-                // Poll quickly only until the native handshake completes; after
-                // that, the slower poll still releases resources after a drop.
-                val delay = if (state == NativeBridge.STATE_CONNECTING) {
-                    STARTUP_POLL_MS
-                } else {
-                    CONNECTED_POLL_MS
-                }
-                mainHandler.postDelayed(this, delay)
-            }
+    @Volatile private var statusThread: Thread? = null
+
+    private fun updateStatus() {
+        val state = NativeBridge.nativeGetState()
+        val text = when (state) {
+            NativeBridge.STATE_CONNECTING -> "Connecting to $currentServer"
+            NativeBridge.STATE_CONNECTED -> "Connected to $currentServer"
+            NativeBridge.STATE_ERROR -> "Connection lost — retrying"
+            NativeBridge.STATE_DISCONNECTED -> "Disconnected"
+            else -> "Preparing audio stream"
         }
+        if (state != lastNotifiedState) {
+            getSystemService(NotificationManager::class.java)
+                .notify(NotificationHelper.NOTIFICATION_ID, NotificationHelper.build(this@AudioService, text))
+            lastNotifiedState = state
+        }
+        syncStreamingResources(state)
+    }
+
+    private fun watchStatus() {
+        if (statusThread != null) return
+        val thread = Thread({
+            val watcher = Thread.currentThread()
+            var revision = -1L
+            while (statusThread === watcher) {
+                val updated = NativeBridge.nativeWaitForUpdate(revision)
+                if (updated != revision) {
+                    revision = updated
+                    mainHandler.post {
+                        if (statusThread === watcher) updateStatus()
+                    }
+                }
+            }
+        }, "SoundwaveStatus")
+        statusThread = thread
+        thread.start()
     }
 
     override fun onCreate() {
@@ -95,7 +102,7 @@ class AudioService : Service() {
     override fun onDestroy() {
         reconnectRequested = false
         lastNotifiedState = Int.MIN_VALUE
-        mainHandler.removeCallbacks(statusUpdater)
+        statusThread = null
         stopPlayback()
         releaseWifiLock()
         NativeBridge.nativeShutdown()
@@ -109,8 +116,7 @@ class AudioService : Service() {
                 NotificationHelper.NOTIFICATION_ID,
                 NotificationHelper.build(this, "Connection setup failed — open the app"),
             )
-            mainHandler.removeCallbacks(statusUpdater)
-            mainHandler.post(statusUpdater)
+            updateStatus()
             return
         }
 
@@ -122,14 +128,13 @@ class AudioService : Service() {
             NotificationHelper.build(this, "Connecting to $currentServer"),
         )
         syncStreamingResources(NativeBridge.nativeGetState())
-        mainHandler.removeCallbacks(statusUpdater)
-        mainHandler.post(statusUpdater)
+        watchStatus()
     }
 
     private fun disconnectAndStop() {
         reconnectRequested = false
         lastNotifiedState = Int.MIN_VALUE
-        mainHandler.removeCallbacks(statusUpdater)
+        statusThread = null
         NativeBridge.nativeDisconnect()
         stopPlayback()
         releaseWifiLock()
@@ -139,9 +144,11 @@ class AudioService : Service() {
 
     private fun syncStreamingResources(state: Int) {
         if (reconnectRequested && state == NativeBridge.STATE_CONNECTED) {
+            applyVolumeAdjustment()
+        }
+        if (reconnectRequested && state == NativeBridge.STATE_CONNECTED && NativeBridge.nativeIsAudioActive()) {
             acquireWifiLock()
             startPlayback()
-            applyVolumeAdjustment()
         } else {
             stopPlayback()
             releaseWifiLock()
@@ -199,6 +206,9 @@ class AudioService : Service() {
                     audioTrack = null
                 }
                 if (audioThread === Thread.currentThread()) audioThread = null
+                mainHandler.post {
+                    if (reconnectRequested) syncStreamingResources(NativeBridge.nativeGetState())
+                }
             }
         }, "SoundwaveAudioTrack")
         audioThread = thread

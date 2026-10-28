@@ -18,7 +18,7 @@ use wasapi::{
     Direction, SampleType, ShareMode, WasapiError, WaveFormat, get_default_device, initialize_mta,
 };
 
-use super::{PcmBlock, convert::f32_le_to_i16};
+use super::{PcmBlock, convert::f32_le_to_i16, transmission::AudioTransmissionGate};
 
 const TARGET_SAMPLE_RATE: usize = 48_000;
 const TARGET_CHANNELS: usize = 2;
@@ -47,11 +47,18 @@ pub fn spawn_loopback_capture(
     eviction_receiver: Receiver<PcmBlock>,
     stop: CancellationToken,
     dropped_blocks: Arc<AtomicU64>,
+    transmission: AudioTransmissionGate,
 ) -> io::Result<thread::JoinHandle<Result<(), AudioError>>> {
     thread::Builder::new()
         .name("wasapi-loopback".to_owned())
         .spawn(move || {
-            let result = capture_loop(sender, eviction_receiver, stop.clone(), dropped_blocks);
+            let result = capture_loop(
+                sender,
+                eviction_receiver,
+                stop.clone(),
+                dropped_blocks,
+                transmission,
+            );
             if result.is_err() {
                 stop.cancel();
             }
@@ -65,7 +72,13 @@ pub fn record_to_pcm(path: &Path, duration: Duration) -> Result<(), AudioError> 
     let (sender, receiver) = bounded(8);
     let stop = CancellationToken::new();
     let dropped = Arc::new(AtomicU64::new(0));
-    let capture = spawn_loopback_capture(sender, receiver.clone(), stop.clone(), dropped)?;
+    let capture = spawn_loopback_capture(
+        sender,
+        receiver.clone(),
+        stop.clone(),
+        dropped,
+        AudioTransmissionGate::enabled(),
+    )?;
     let mut output = File::create(path)?;
     let deadline = Instant::now() + duration;
 
@@ -93,6 +106,7 @@ fn capture_loop(
     eviction_receiver: Receiver<PcmBlock>,
     stop: CancellationToken,
     dropped_blocks: Arc<AtomicU64>,
+    transmission: AudioTransmissionGate,
 ) -> Result<(), AudioError> {
     initialize_mta()
         .ok()
@@ -133,6 +147,18 @@ fn capture_loop(
     let capture_result = loop {
         if stop.is_cancelled() {
             break Ok(());
+        }
+
+        if !transmission.is_enabled() {
+            audio_client.stop_stream()?;
+            audio_client.reset_stream()?;
+            assembler.filled = 0;
+            while eviction_receiver.try_recv().is_ok() {}
+            transmission.wait_until_enabled(&stop);
+            if stop.is_cancelled() {
+                return Ok(());
+            }
+            audio_client.start_stream()?;
         }
 
         loop {

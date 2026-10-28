@@ -6,7 +6,6 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicI32, Ordering},
         mpsc::{self, Receiver, Sender, SyncSender, TryRecvError},
     },
     thread,
@@ -17,7 +16,10 @@ use qrcodegen::{QrCode, QrCodeEcc};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use crate::{network::server::AudioTransmissionGate, pairing::PairingInfo};
+use crate::{
+    network::{server::AudioTransmissionGate, volume::VolumeAdjustment},
+    pairing::PairingInfo,
+};
 use windows::{
     Win32::{
         Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
@@ -102,7 +104,7 @@ struct UiContext {
     status: UiStatus,
     shutdown: CancellationToken,
     transmission: AudioTransmissionGate,
-    volume_adjustment: Arc<AtomicI32>,
+    volume_adjustment: Arc<VolumeAdjustment>,
     receiver: Receiver<UiCommand>,
     status_label: Option<HWND>,
     qr_matrix: Option<QrCode>,
@@ -126,7 +128,7 @@ impl ServerUi {
         info: ServerUiInfo,
         shutdown: CancellationToken,
         transmission: AudioTransmissionGate,
-        volume_adjustment: Arc<AtomicI32>,
+        volume_adjustment: Arc<VolumeAdjustment>,
     ) -> Result<Self> {
         let (sender, receiver) = mpsc::channel();
         let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
@@ -232,7 +234,7 @@ fn run_ui_thread(
     info: ServerUiInfo,
     shutdown: CancellationToken,
     transmission: AudioTransmissionGate,
-    volume_adjustment: Arc<AtomicI32>,
+    volume_adjustment: Arc<VolumeAdjustment>,
     receiver: Receiver<UiCommand>,
     ready_sender: SyncSender<Result<(), String>>,
 ) {
@@ -593,11 +595,7 @@ fn adjust_client_volume(steps: i32) {
         if !matches!(&context.status, UiStatus::Streaming(_)) {
             return;
         }
-        let _ = context.volume_adjustment.fetch_update(
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-            |pending| Some(pending.saturating_add(steps)),
-        );
+        context.volume_adjustment.add(steps);
     });
 }
 

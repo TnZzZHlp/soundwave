@@ -1,6 +1,6 @@
 use std::sync::{
-    Mutex,
-    atomic::{AtomicI32, AtomicU64, Ordering},
+    Condvar, Mutex,
+    atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering},
 };
 
 const MAX_PENDING_VOLUME_STEPS: i32 = 100;
@@ -32,12 +32,15 @@ impl ClientState {
 #[derive(Debug)]
 pub struct SharedState {
     state: AtomicI32,
+    audio_active: AtomicBool,
+    revision: Mutex<u64>,
+    changed: Condvar,
     received_packets: AtomicU64,
     lost_packets: AtomicU64,
     late_packets: AtomicU64,
     rtt_ms: AtomicU64,
     jitter_buffer_ms: AtomicU64,
-    volume_adjustment: AtomicI32,
+    volume_adjustment: Mutex<i32>,
     last_error: Mutex<String>,
 }
 
@@ -45,12 +48,15 @@ impl Default for SharedState {
     fn default() -> Self {
         Self {
             state: AtomicI32::new(ClientState::Idle as i32),
+            audio_active: AtomicBool::new(false),
+            revision: Mutex::new(0),
+            changed: Condvar::new(),
             received_packets: AtomicU64::new(0),
             lost_packets: AtomicU64::new(0),
             late_packets: AtomicU64::new(0),
             rtt_ms: AtomicU64::new(0),
             jitter_buffer_ms: AtomicU64::new(0),
-            volume_adjustment: AtomicI32::new(0),
+            volume_adjustment: Mutex::new(0),
             last_error: Mutex::new(String::new()),
         }
     }
@@ -63,7 +69,7 @@ impl SharedState {
         self.late_packets.store(0, Ordering::Relaxed);
         self.rtt_ms.store(0, Ordering::Relaxed);
         self.jitter_buffer_ms.store(0, Ordering::Relaxed);
-        self.volume_adjustment.store(0, Ordering::Relaxed);
+        self.take_volume_adjustment();
         if let Ok(mut error) = self.last_error.lock() {
             error.clear();
         }
@@ -71,7 +77,45 @@ impl SharedState {
     }
 
     pub fn set(&self, state: ClientState) {
-        self.state.store(state as i32, Ordering::Release);
+        if state != ClientState::Connected {
+            self.set_audio_active(false);
+        }
+        if self.state.swap(state as i32, Ordering::AcqRel) != state as i32 {
+            self.notify_changed();
+        }
+    }
+
+    pub fn audio_active(&self) -> bool {
+        self.audio_active.load(Ordering::Acquire)
+    }
+
+    pub fn set_audio_active(&self, active: bool) {
+        if self.audio_active.swap(active, Ordering::AcqRel) != active {
+            self.notify_changed();
+        }
+    }
+
+    pub fn wait_for_update(&self, previous: u64) -> u64 {
+        let revision = self
+            .revision
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let (revision, _) = self
+            .changed
+            .wait_timeout_while(revision, std::time::Duration::from_secs(30), |revision| {
+                *revision == previous
+            })
+            .unwrap_or_else(|error| error.into_inner());
+        *revision
+    }
+
+    fn notify_changed(&self) {
+        let mut revision = self
+            .revision
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        *revision = revision.wrapping_add(1);
+        self.changed.notify_all();
     }
 
     pub fn state(&self) -> ClientState {
@@ -133,18 +177,41 @@ impl SharedState {
     }
 
     pub fn add_volume_adjustment(&self, steps: i8) {
-        let _ =
-            self.volume_adjustment
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                    Some(
-                        current
-                            .saturating_add(i32::from(steps))
-                            .clamp(-MAX_PENDING_VOLUME_STEPS, MAX_PENDING_VOLUME_STEPS),
-                    )
-                });
+        let mut pending = self
+            .volume_adjustment
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        *pending = pending
+            .saturating_add(i32::from(steps))
+            .clamp(-MAX_PENDING_VOLUME_STEPS, MAX_PENDING_VOLUME_STEPS);
+        drop(pending);
+        self.notify_changed();
     }
 
     pub fn take_volume_adjustment(&self) -> i32 {
-        self.volume_adjustment.swap(0, Ordering::Relaxed)
+        let mut pending = self
+            .volume_adjustment
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        std::mem::take(&mut *pending)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resource_updates_are_observable_even_before_waiting() {
+        let state = SharedState::default();
+        let revision = state.wait_for_update(u64::MAX);
+        state.set(ClientState::Connected);
+        state.set_audio_active(true);
+        let connected = state.wait_for_update(revision);
+        assert_ne!(connected, revision);
+        assert!(state.audio_active());
+        state.set(ClientState::Connecting);
+        assert_ne!(state.wait_for_update(connected), connected);
+        assert!(!state.audio_active());
     }
 }
