@@ -94,7 +94,7 @@ From the repository root, build the release Windows server and signed Android AP
 just
 ```
 
-`just` runs the Android Gradle wrapper after the release Windows-server build, so the Android prerequisites above are required. The APK is written to `android\app\build\outputs\apk\release\app-release.apk`. On the first build, Gradle creates a reusable local signing key at `android\app\local-release.keystore`.
+`just` runs the Android Gradle wrapper after the release Windows-server build, so the Android prerequisites above are required. The APK is written to `android\app\build\outputs\apk\release\app-release.apk`. On the first local build, Gradle creates a throwaway signing key at `android\app\local-release.keystore`; that key is for development installs only. Official builds are signed with the release keystore held in the repository's GitHub Actions secrets.
 
 Useful task shortcuts:
 
@@ -193,11 +193,31 @@ gradle :app:assembleRelease
 3. Review the populated values, then tap **Connect**.
 4. Allow notification permission when Android asks.
 
-The scanner uses the Google Play services Code Scanner and does not request camera permission from Soundwave. On a device without available Google Play services or before the scanner module is downloaded, use the existing manual fields instead.
+The scanner is built into the app: CameraX opens the camera in a dedicated scan screen and ZXing decodes the frames locally. Nothing is sent to another app or service, and scanning works on devices without Google Play services. The app asks for camera access the first time the scan button is used; without it, the host, port, and fingerprint can still be entered manually.
 
 The app starts a `mediaPlayback` foreground service before connecting and holds a Wi-Fi lock only while a live stream is active. The notification has a **Disconnect** action. Audio continues when the activity is destroyed, the app is switched away from, the screen is off, or the phone is locked. Disconnect stops the QUIC task, clears the ring, stops AudioTrack, releases the Wi-Fi lock, removes the foreground notification, and stops the service. If the stream ends for any other reason (server shutdown, network drop, handshake failure), the client reconnects automatically with an exponential backoff from 1 s to 10 s, retrying indefinitely until the server returns or the user disconnects. During connection attempts and retry backoff, AudioTrack is stopped and the Wi-Fi lock is released; both resume after the stream reaches `Connected`. Use the Windows notification-area menu to change the connected phone's media volume; jitter buffering adjusts automatically on Android.
 
 The UI shows a conservative estimated latency, current buffer duration, and packet/loss/late/underrun counters. The latency number is an estimate (`RTT / 2 + jitter/ring buffering`), not a claim of exact speaker-output latency.
+
+## Releases
+
+Pushing a `v*` tag, or running the **release** workflow manually with a tag, builds and publishes both artifacts:
+
+- `soundwave-<version>.apk`, signed with the release keystore, for `arm64-v8a` and `x86_64`
+- `audio-stream-server.exe`, cross-compiled for Windows with `x86_64-pc-windows-gnu`
+
+Both jobs also upload `SHA256SUMS-*.txt`, and the workflow verifies the APK signature with `apksigner` before publishing. `versionName` comes from the tag without its leading `v`; `versionCode` is the commit count of the tagged revision.
+
+Release signing uses four repository secrets:
+
+| Secret | Contents |
+| --- | --- |
+| `SOUNDWAVE_KEYSTORE_BASE64` | Base64 of the PKCS12 release keystore |
+| `SOUNDWAVE_KEYSTORE_PASSWORD` | Keystore password |
+| `SOUNDWAVE_KEY_ALIAS` | Key alias inside the keystore |
+| `SOUNDWAVE_KEY_PASSWORD` | Key password |
+
+The Gradle build also accepts the same values through `SOUNDWAVE_KEYSTORE_PATH`, `SOUNDWAVE_KEYSTORE_PASSWORD`, `SOUNDWAVE_KEY_ALIAS`, and `SOUNDWAVE_KEY_PASSWORD`, or the matching `soundwaveKeystorePath`, `soundwaveKeystorePassword`, `soundwaveKeyAlias`, `soundwaveKeyPassword` Gradle properties, so a signed APK can be reproduced locally. Keep the keystore and its passwords out of the repository: Android only accepts updates to an installed app when the signing key matches.
 
 ## Windows Firewall
 
@@ -209,7 +229,7 @@ Allow inbound **UDP 48400** for `audio-stream-server.exe`. QUIC uses UDP; openin
 | --- | --- |
 | Android cannot connect | Verify both devices are on the same subnet, Windows Firewall permits UDP 48400, and guest/AP isolation is disabled. |
 | Pairing QR is unavailable | Use the shown reason to choose a reachable IPv4 address, then restart with `--pairing-host <IPv4>`. |
-| QR scan cannot start | Confirm Google Play services is available and current on the phone, or enter the host, port, and fingerprint manually. |
+| QR scan cannot start | Grant camera permission to the app and make sure no other app is holding the camera, or enter the host, port, and fingerprint manually. |
 | Certificate error | Copy the current server fingerprint exactly. Delete neither the server identity directory nor the app’s saved pairing unintentionally. |
 | No sound | Run `--capture-to capture.pcm` and inspect the raw file. Verify Windows is playing through its default output device. |
 | Immediate disconnect | Confirm the Android app and server use the same protocol version and that the phone can reach the entered IP address. |

@@ -4,5 +4,8 @@
     <string name="scan_pairing_qr">Scan pairing QR</string>
     <string name="pairing_qr_invalid">That code is not a valid Soundwave pairing QR code</string>
     <string name="pairing_qr_filled">Pairing information filled in. Review it, then tap Connect.</string>
-    <string name="pairing_qr_scanner_unavailable">QR scanner unavailable: %1$s</string>
+    <string name="pairing_qr_scanner_hint">Point the camera at the pairing QR code shown by the Windows server</string>
+    <string name="pairing_qr_not_pairing_code">Not a Soundwave pairing code. Keep the server QR code in the frame.</string>
+    <string name="pairing_qr_camera_denied">Camera permission is required to scan the pairing QR code</string>
+    <string name="pairing_qr_camera_unavailable">Camera unavailable on this device. Enter the server details manually.</string>
 </resources>

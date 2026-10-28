@@ -8,9 +8,21 @@ val keytool = file(
     "${System.getProperty("java.home")}/bin/keytool" +
         if (System.getProperty("os.name").startsWith("Windows")) ".exe" else "",
 )
+
+// Release signing reads an externally supplied keystore when one is provided
+// (CI secrets), otherwise it uses the reusable local keystore below.
+fun signingSetting(environment: String, property: String): String? =
+    System.getenv(environment)?.takeIf { it.isNotBlank() }
+        ?: providers.gradleProperty(property).orNull?.takeIf { it.isNotBlank() }
+
+val externalKeystorePath = signingSetting("SOUNDWAVE_KEYSTORE_PATH", "soundwaveKeystorePath")
+val externalKeystorePassword = signingSetting("SOUNDWAVE_KEYSTORE_PASSWORD", "soundwaveKeystorePassword")
+val externalKeyAlias = signingSetting("SOUNDWAVE_KEY_ALIAS", "soundwaveKeyAlias")
+val externalKeyPassword = signingSetting("SOUNDWAVE_KEY_PASSWORD", "soundwaveKeyPassword")
+
 val generateLocalReleaseKeystore by tasks.registering(Exec::class) {
     description = "Generates a reusable local signing key for release APKs."
-    onlyIf { !localReleaseKeystore.exists() }
+    onlyIf { externalKeystorePath == null && !localReleaseKeystore.exists() }
     outputs.file(localReleaseKeystore)
     commandLine(
         keytool,
@@ -29,7 +41,11 @@ val generateLocalReleaseKeystore by tasks.registering(Exec::class) {
 }
 
 dependencies {
-    implementation("com.google.android.gms:play-services-code-scanner:16.1.0")
+    implementation("androidx.activity:activity:1.9.3")
+    implementation("androidx.camera:camera-camera2:1.4.2")
+    implementation("androidx.camera:camera-lifecycle:1.4.2")
+    implementation("androidx.camera:camera-view:1.4.2")
+    implementation("com.google.zxing:core:3.5.3")
 }
 
 android {
@@ -41,8 +57,8 @@ android {
         applicationId = "com.example.audiostream"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = providers.gradleProperty("versionCode").orNull?.toIntOrNull() ?: 1
+        versionName = providers.gradleProperty("versionName").orNull ?: "0.1.0"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")
@@ -51,10 +67,17 @@ android {
 
     signingConfigs {
         create("release") {
-            storeFile = localReleaseKeystore
-            storePassword = "soundwave"
-            keyAlias = "soundwave"
-            keyPassword = "soundwave"
+            if (externalKeystorePath != null) {
+                storeFile = file(externalKeystorePath)
+                storePassword = externalKeystorePassword
+                keyAlias = externalKeyAlias
+                keyPassword = externalKeyPassword
+            } else {
+                storeFile = localReleaseKeystore
+                storePassword = "soundwave"
+                keyAlias = "soundwave"
+                keyPassword = "soundwave"
+            }
         }
     }
 
