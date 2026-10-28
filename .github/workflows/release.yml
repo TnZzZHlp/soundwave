@@ -26,6 +26,7 @@ jobs:
   windows-server:
     name: Windows server (cross-compiled)
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -61,6 +62,7 @@ jobs:
   android-apk:
     name: Android APK (signed)
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -69,12 +71,31 @@ jobs:
           distribution: temurin
           java-version: "21"
 
-      - uses: android-actions/setup-android@v3
-
-      - name: Install NDK and Android Rust targets
+      - name: Prepare Android SDK and NDK
         run: |
-          sdkmanager --install "ndk;27.1.12297006" "platforms;android-36" "build-tools;36.0.0" "platform-tools"
-          rustup target add aarch64-linux-android x86_64-linux-android
+          sdk_root="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          if [ ! -d "$sdk_root" ]; then
+            echo "Android SDK not found at $sdk_root" >&2
+            exit 1
+          fi
+          echo "ANDROID_HOME=$sdk_root" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$sdk_root" >> "$GITHUB_ENV"
+
+          sdkmanager="$(find "$sdk_root/cmdline-tools" -maxdepth 3 -name sdkmanager -type f | sort | tail -1)"
+          packages=()
+          [ -d "$sdk_root/platforms/android-36" ] || packages+=("platforms;android-36")
+          [ -d "$sdk_root/build-tools/36.0.0" ] || packages+=("build-tools;36.0.0")
+          if [ -z "$(ls -d "$sdk_root"/ndk/* 2>/dev/null)" ]; then
+            packages+=("ndk;27.1.12297006")
+          fi
+          if [ ${#packages[@]} -gt 0 ]; then
+            yes | "$sdkmanager" --licenses > /dev/null || true
+            "$sdkmanager" "${packages[@]}"
+          fi
+
+          ndk_dir="$(ls -d "$sdk_root"/ndk/* | sort -V | tail -1)"
+          echo "ANDROID_NDK_HOME=$ndk_dir" >> "$GITHUB_ENV"
+          echo "Using NDK $ndk_dir"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -114,7 +135,6 @@ jobs:
 
       - name: Assemble signed APK
         env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.1.12297006
           SOUNDWAVE_KEYSTORE_PATH: ${{ runner.temp }}/soundwave-release.jks
           SOUNDWAVE_KEYSTORE_PASSWORD: ${{ secrets.SOUNDWAVE_KEYSTORE_PASSWORD }}
           SOUNDWAVE_KEY_ALIAS: ${{ secrets.SOUNDWAVE_KEY_ALIAS }}
@@ -136,7 +156,6 @@ jobs:
           "${ANDROID_HOME}/build-tools/36.0.0/apksigner" verify --print-certs "dist/soundwave-$VERSION.apk"
           cd dist
           sha256sum "soundwave-$VERSION.apk" > SHA256SUMS-android.txt
-
       - uses: actions/upload-artifact@v4
         with:
           name: android-apk
@@ -147,6 +166,7 @@ jobs:
     name: Publish GitHub release
     needs: [windows-server, android-apk]
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
