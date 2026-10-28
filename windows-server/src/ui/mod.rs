@@ -4,20 +4,18 @@ use std::{
     mem::size_of,
     net::SocketAddr,
     path::{Path, PathBuf},
-    sync::{
-        Arc,
-        mpsc::{self, Receiver, Sender, SyncSender, TryRecvError},
-    },
+    sync::mpsc::{self, Receiver, Sender, SyncSender, TryRecvError},
     thread,
 };
 
 use anyhow::{Context, Result};
+use audio_stream_protocol::ControlMessage;
 use qrcodegen::{QrCode, QrCodeEcc};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::{
-    network::{server::AudioTransmissionGate, volume::VolumeAdjustment},
+    application::registry::ReceiverRegistry, network::server::AudioTransmissionGate,
     pairing::PairingInfo,
 };
 use windows::{
@@ -91,7 +89,7 @@ pub(crate) struct ServerUiReporter {
 #[derive(Clone)]
 enum UiStatus {
     WaitingForClient,
-    Streaming(SocketAddr),
+    Streaming(Vec<SocketAddr>),
 }
 
 enum UiCommand {
@@ -104,7 +102,7 @@ struct UiContext {
     status: UiStatus,
     shutdown: CancellationToken,
     transmission: AudioTransmissionGate,
-    volume_adjustment: Arc<VolumeAdjustment>,
+    registry: ReceiverRegistry,
     receiver: Receiver<UiCommand>,
     status_label: Option<HWND>,
     qr_matrix: Option<QrCode>,
@@ -128,7 +126,7 @@ impl ServerUi {
         info: ServerUiInfo,
         shutdown: CancellationToken,
         transmission: AudioTransmissionGate,
-        volume_adjustment: Arc<VolumeAdjustment>,
+        registry: ReceiverRegistry,
     ) -> Result<Self> {
         let (sender, receiver) = mpsc::channel();
         let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
@@ -140,7 +138,7 @@ impl ServerUi {
                     info,
                     shutdown,
                     transmission,
-                    volume_adjustment,
+                    registry,
                     receiver,
                     ready_sender,
                 )
@@ -177,11 +175,11 @@ impl ServerUiReporter {
             .send(UiCommand::SetStatus(UiStatus::WaitingForClient));
     }
 
-    /// Shows the currently connected Android peer.
-    pub(crate) fn streaming_to(&self, peer: SocketAddr) {
+    /// Shows every currently connected Android receiver.
+    pub(crate) fn streaming_to(&self, peers: &[SocketAddr]) {
         let _ = self
             .sender
-            .send(UiCommand::SetStatus(UiStatus::Streaming(peer)));
+            .send(UiCommand::SetStatus(UiStatus::Streaming(peers.to_vec())));
     }
 }
 
@@ -222,11 +220,33 @@ impl UiStatus {
         match (self, transmission_enabled) {
             (Self::WaitingForClient, true) => "Status: Waiting for Android client".to_owned(),
             (Self::WaitingForClient, false) => "Status: Disabled; no audio will be sent".to_owned(),
-            (Self::Streaming(peer), true) => format!("Status: Streaming to {peer}"),
-            (Self::Streaming(peer), false) => {
-                format!("Status: Disabled; audio paused for {peer}")
+            (Self::Streaming(peers), true) => {
+                format!("Status: Streaming to {}", describe_peers(peers))
+            }
+            (Self::Streaming(peers), false) => {
+                format!(
+                    "Status: Disabled; audio paused for {}",
+                    describe_peers(peers)
+                )
             }
         }
+    }
+}
+
+/// Renders the receiver count with at most three addresses so the status line
+/// stays readable while still naming the connected phones.
+fn describe_peers(peers: &[SocketAddr]) -> String {
+    let count = peers.len();
+    let noun = if count == 1 { "receiver" } else { "receivers" };
+    let addresses: Vec<String> = peers.iter().take(3).map(ToString::to_string).collect();
+    if count <= 3 {
+        format!("{count} {noun} ({})", addresses.join(", "))
+    } else {
+        format!(
+            "{count} {noun} ({}, +{} more)",
+            addresses.join(", "),
+            count - 3
+        )
     }
 }
 
@@ -234,7 +254,7 @@ fn run_ui_thread(
     info: ServerUiInfo,
     shutdown: CancellationToken,
     transmission: AudioTransmissionGate,
-    volume_adjustment: Arc<VolumeAdjustment>,
+    registry: ReceiverRegistry,
     receiver: Receiver<UiCommand>,
     ready_sender: SyncSender<Result<(), String>>,
 ) {
@@ -244,7 +264,7 @@ fn run_ui_thread(
             status: UiStatus::WaitingForClient,
             shutdown,
             transmission,
-            volume_adjustment,
+            registry,
             receiver,
             status_label: None,
             qr_matrix: None,
@@ -586,16 +606,21 @@ fn toggle_audio_transmission() {
     info!(enabled, "audio transmission service toggled");
 }
 
+/// Fans a volume change out to every connected receiver. Receivers keep their
+/// own local media volume, so this steps all connected phones together.
 fn adjust_client_volume(steps: i32) {
     UI_CONTEXT.with(|context| {
         let context = context.borrow();
         let Some(context) = context.as_ref() else {
             return;
         };
-        if !matches!(&context.status, UiStatus::Streaming(_)) {
+        if context.registry.len() == 0 {
             return;
         }
-        context.volume_adjustment.add(steps);
+        let steps = steps.clamp(i32::from(i8::MIN), i32::from(i8::MAX)) as i8;
+        context
+            .registry
+            .broadcast(ControlMessage::AdjustVolume { steps });
     });
 }
 

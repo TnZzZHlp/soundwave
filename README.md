@@ -1,12 +1,12 @@
 # Soundwave — Windows to Android LAN audio
 
-Soundwave captures the current Windows output device with WASAPI loopback and streams PCM to one Android phone over LAN QUIC. It is intentionally a small V0.1: no cloud service, accounts, WebRTC, RTP, virtual audio device, or codec is involved.
+Soundwave captures the current Windows output device with WASAPI loopback and streams PCM to Android phones over LAN QUIC. Several phones can listen at the same time; the server sends one independent QUIC datagram stream to each receiver. It is intentionally a small V0.1: no cloud service, accounts, WebRTC, RTP, virtual audio device, or codec is involved.
 
 ```text
 Windows system audio
   WASAPI loopback → Windows shared-mode conversion → f32 → i16 PCM
-  bounded 10 ms capture queue → QUIC Datagram
-  reliable QUIC control stream (Hello / StreamInfo / Start / Stop / Ping / Pong / AdjustVolume)
+  bounded 10 ms capture queue → fan-out → one QUIC Datagram stream per receiver
+  reliable per-receiver QUIC control stream (Hello / StreamInfo / Start / Stop / AdjustVolume / AudioIdle)
   Android QUIC client → jitter buffer → lock-free PCM ring
   Kotlin AudioTrack platform shim → speaker / headset
 ```
@@ -195,7 +195,7 @@ gradle :app:assembleRelease
 
 The scanner is built into the app: CameraX opens the camera in a dedicated scan screen and ZXing decodes the frames locally. Nothing is sent to another app or service, and scanning works on devices without Google Play services. The app asks for camera access the first time the scan button is used; without it, the host, port, and fingerprint can still be entered manually.
 
-The app starts a `mediaPlayback` foreground service before connecting and holds a Wi-Fi lock only while a live stream is active. The notification has a **Disconnect** action. Audio continues when the activity is destroyed, the app is switched away from, the screen is off, or the phone is locked. Disconnect stops the QUIC task, clears the ring, stops AudioTrack, releases the Wi-Fi lock, removes the foreground notification, and stops the service. If the stream ends for any other reason (server shutdown, network drop, handshake failure), the client reconnects automatically with an exponential backoff from 1 s to 10 s, retrying indefinitely until the server returns or the user disconnects. During connection attempts and retry backoff, AudioTrack is stopped and the Wi-Fi lock is released; both resume after the stream reaches `Connected`. Use the Windows notification-area menu to change the connected phone's media volume; jitter buffering adjusts automatically on Android.
+The app starts a `mediaPlayback` foreground service before connecting and holds a Wi-Fi lock only while a live stream is active. The notification has a **Disconnect** action. Audio continues when the activity is destroyed, the app is switched away from, the screen is off, or the phone is locked. Disconnect stops the QUIC task, clears the ring, stops AudioTrack, releases the Wi-Fi lock, removes the foreground notification, and stops the service. If the stream ends for any other reason (server shutdown, network drop, handshake failure), the client reconnects automatically with an exponential backoff from 1 s to 10 s, retrying indefinitely until the server returns or the user disconnects. During connection attempts and retry backoff, AudioTrack is stopped and the Wi-Fi lock is released; both resume after the stream reaches `Connected`. Use the Windows notification-area menu to change the media volume of every connected phone at once; jitter buffering adjusts automatically on Android.
 
 The UI shows a conservative estimated latency, current buffer duration, and packet/loss/late/underrun counters. The latency number is an estimate (`RTT / 2 + jitter/ring buffering`), not a claim of exact speaker-output latency.
 
@@ -239,4 +239,4 @@ Allow inbound **UDP 48400** for `audio-stream-server.exe`. QUIC uses UDP; openin
 
 ## Current V0.1 boundaries
 
-This project intentionally does not yet provide Opus, mDNS discovery, device selection, multiple clients, iOS/Linux/macOS support, public-Internet traversal, or accounts. PCM transport remains codec-neutral at the QUIC packet layer so an Opus encoder/decoder can be introduced later without replacing the control or datagram transport.
+This project intentionally does not yet provide Opus, mDNS discovery, device selection, iOS/Linux/macOS support, public-Internet traversal, or accounts. PCM transport remains codec-neutral at the QUIC packet layer so an Opus encoder/decoder can be introduced later without replacing the control or datagram transport.

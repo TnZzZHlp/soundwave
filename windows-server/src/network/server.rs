@@ -1,9 +1,6 @@
-use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
-    time::Duration,
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
 };
 
 use anyhow::Context;
@@ -12,17 +9,17 @@ use audio_stream_protocol::{
 };
 use audio_stream_transport::{ControlReader, ControlWriter, DatagramSender, TransportError};
 use bytes::Bytes;
-use crossbeam_channel::Receiver;
 use quinn::Connection;
+use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use crate::audio::PcmBlock;
 
-use super::{silence::SilenceDetector, volume::VolumeAdjustment};
+use super::silence::SilenceDetector;
 
-/// One 10 ms frame keeps a transient sender stall from turning into audible
-/// queueing delay; capture evicts it before enqueueing newer audio.
+/// Smallest shared-capture buffer that still keeps one 10 ms block available
+/// for every receiver without accumulating delay.
 pub const FRAME_QUEUE_CAPACITY: usize = 1;
 
 pub use crate::audio::transmission::AudioTransmissionGate;
@@ -31,6 +28,7 @@ pub use crate::audio::transmission::AudioTransmissionGate;
 pub struct StreamCounters {
     pub packets_sent: AtomicU64,
     pub packets_dropped: AtomicU64,
+    pub blocks_skipped: AtomicU64,
 }
 
 pub async fn perform_handshake(
@@ -84,81 +82,103 @@ pub async fn perform_handshake(
     Ok((writer, reader, frame_duration_ms))
 }
 
+/// Sends shared capture blocks to one receiver.
+///
+/// Every receiver runs its own sender task with its own packetizer, sequence
+/// counter and counters, so a congested phone only loses its own audio. Capture
+/// blocks arrive as shared `Arc`s; a receiver that falls behind gets `Lagged`
+/// and drops the blocks it missed instead of slowing the other receivers.
 pub fn spawn_datagram_sender(
     connection: Connection,
-    frames: Receiver<PcmBlock>,
+    mut frames: broadcast::Receiver<Arc<PcmBlock>>,
     frame_duration_ms: u8,
     stop: CancellationToken,
     counters: Arc<StreamCounters>,
     transmission: AudioTransmissionGate,
-    activity: tokio::sync::mpsc::Sender<ControlMessage>,
-) -> std::io::Result<std::thread::JoinHandle<Result<(), TransportError>>> {
-    std::thread::Builder::new()
-        .name("quic-audio-send".to_owned())
-        .spawn(move || {
-            let sender = match DatagramSender::new(connection) {
-                Ok(sender) => sender,
-                Err(error) => {
-                    stop.cancel();
-                    return Err(error);
-                }
-            };
-            let mut packetizer = Packetizer::new(frame_duration_ms);
-            let mut silence = SilenceDetector::new();
-            let result = loop {
-                if stop.is_cancelled() {
+    outbound: tokio::sync::mpsc::Sender<ControlMessage>,
+) -> tokio::task::JoinHandle<Result<(), TransportError>> {
+    tokio::runtime::Handle::current().spawn(async move {
+        let sender = match DatagramSender::new(connection) {
+            Ok(sender) => sender,
+            Err(error) => {
+                stop.cancel();
+                return Err(error);
+            }
+        };
+        let mut packetizer = Packetizer::new(frame_duration_ms);
+        let mut silence = SilenceDetector::new();
+        let poll = std::time::Duration::from_millis(100);
+
+        let result = loop {
+            if stop.is_cancelled() {
+                break Ok(());
+            }
+            if !transmission.is_enabled() {
+                let (_, became_idle) = silence.update(0, true, false);
+                packetizer.pending_tail = None;
+                if became_idle && !report_idle(&outbound, &packetizer).await {
                     break Ok(());
                 }
-                if !transmission.is_enabled() {
-                    let (_, became_idle) = silence.update(0, true, false);
-                    packetizer.pending_tail = None;
-                    if became_idle
-                        && activity
-                            .blocking_send(ControlMessage::AudioIdle {
-                                next_sequence: packetizer.sequence,
-                            })
-                            .is_err()
-                    {
-                        break Ok(());
-                    }
-                    transmission.wait_until_enabled(&stop);
-                    continue;
-                }
-                match frames.recv_timeout(Duration::from_millis(100)) {
-                    Ok(block) => {
-                        let (send, became_idle) = silence.update(
-                            block.timestamp,
-                            block.samples.iter().all(|&sample| sample == 0),
-                            transmission.is_enabled(),
-                        );
-                        if became_idle {
-                            packetizer.pending_tail = None;
-                            if activity
-                                .blocking_send(ControlMessage::AudioIdle {
-                                    next_sequence: packetizer.sequence,
-                                })
-                                .is_err()
-                            {
-                                break Ok(());
-                            }
-                        }
-                        if !send {
-                            continue;
-                        }
-                        match packetizer.send_block(&sender, block, &counters, &transmission) {
-                            Ok(()) => {}
-                            Err(error) => break Err(error),
-                        }
-                    }
-                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
-                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break Ok(()),
-                }
-            };
-            if result.is_err() {
-                stop.cancel();
+                // The blocking gate wait must not occupy an async worker.
+                let wait = stop.clone();
+                let gate = transmission.clone();
+                let _ = tokio::task::spawn_blocking(move || gate.wait_until_enabled(&wait)).await;
+                continue;
             }
-            result
+
+            match tokio::time::timeout(poll, frames.recv()).await {
+                Ok(Ok(block)) => {
+                    let (send, became_idle) = silence.update(
+                        block.timestamp,
+                        block.samples.iter().all(|&sample| sample == 0),
+                        transmission.is_enabled(),
+                    );
+                    if became_idle {
+                        packetizer.pending_tail = None;
+                        if !report_idle(&outbound, &packetizer).await {
+                            break Ok(());
+                        }
+                    }
+                    if !send {
+                        continue;
+                    }
+                    let block = Arc::try_unwrap(block).unwrap_or_else(|shared| PcmBlock {
+                        timestamp: shared.timestamp,
+                        samples: shared.samples,
+                    });
+                    match packetizer.send_block(&sender, block, &counters, &transmission) {
+                        Ok(()) => {}
+                        Err(error) => break Err(error),
+                    }
+                }
+                Ok(Err(broadcast::error::RecvError::Lagged(skipped))) => {
+                    counters
+                        .blocks_skipped
+                        .fetch_add(skipped, Ordering::Relaxed);
+                    packetizer.pending_tail = None;
+                }
+                Ok(Err(broadcast::error::RecvError::Closed)) => break Ok(()),
+                Err(_elapsed) => continue,
+            }
+        };
+
+        if result.is_err() {
+            stop.cancel();
+        }
+        result
+    })
+}
+
+async fn report_idle(
+    outbound: &tokio::sync::mpsc::Sender<ControlMessage>,
+    packetizer: &Packetizer,
+) -> bool {
+    outbound
+        .send(ControlMessage::AudioIdle {
+            next_sequence: packetizer.sequence,
         })
+        .await
+        .is_ok()
 }
 
 /// Chooses the largest whole-millisecond packet duration that QUIC has actually
@@ -329,27 +349,16 @@ pub async fn process_control_messages(
     writer: &mut ControlWriter,
     connection: &Connection,
     stop: &CancellationToken,
-    volume_adjustment: Arc<VolumeAdjustment>,
-    mut activity: tokio::sync::mpsc::Receiver<ControlMessage>,
+    mut outbound: tokio::sync::mpsc::Receiver<ControlMessage>,
 ) {
     loop {
         tokio::select! {
             _ = stop.cancelled() => break,
             _ = connection.closed() => break,
-            Some(message) = activity.recv() => {
+            Some(message) = outbound.recv() => {
                 if let Err(error) = writer.send(&message).await {
-                    warn!(%error, "failed to send audio activity");
+                    warn!(%error, "failed to send a server control message");
                     break;
-                }
-            }
-            _ = volume_adjustment.changed() => {
-                let steps = volume_adjustment.take();
-                if steps != 0 {
-                    let steps = steps.clamp(i32::from(i8::MIN), i32::from(i8::MAX)) as i8;
-                    if let Err(error) = writer.send(&ControlMessage::AdjustVolume { steps }).await {
-                        warn!(%error, "failed to adjust client volume");
-                        break;
-                    }
                 }
             }
             message = reader.receive() => match message {

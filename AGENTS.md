@@ -2,9 +2,9 @@
 
 ## Project overview
 
-Soundwave streams the Windows default output device (WASAPI loopback) as PCM to one Android phone over LAN QUIC. V0.1 scope: no cloud, no accounts, no codec (Opus is planned later), no mDNS, one client at a time. After a drop, the client reconnects automatically with exponential backoff until the server returns or the user disconnects. See README.md for the full design rationale.
+Soundwave streams the Windows default output device (WASAPI loopback) as PCM to Android phones over LAN QUIC. Several receivers may listen at once: one shared WASAPI capture feeds an independent QUIC datagram stream per connection, with no hard receiver cap. V0.1 scope: no cloud, no accounts, no codec (Opus is planned later), no mDNS. After a drop, the client reconnects automatically with exponential backoff until the server returns or the user disconnects. See README.md for the full design rationale.
 
-Data flow: WASAPI loopback -> shared-mode conversion -> f32 -> i16 PCM -> bounded 10 ms capture queue -> QUIC datagrams; Android client -> jitter buffer -> SPSC PCM ring -> Kotlin AudioTrack.
+Data flow: WASAPI loopback -> shared-mode conversion -> f32 -> i16 PCM -> bounded 10 ms capture queue -> broadcast fan-out -> per-receiver QUIC datagrams; Android client -> jitter buffer -> SPSC PCM ring -> Kotlin AudioTrack.
 
 Ownership split: Rust owns QUIC, packet validation, certificate pinning, jitter buffer, and PCM ring. Kotlin owns Android lifecycle, notification, Wi-Fi lock, and AudioTrack. Kotlin must not own streaming objects or network state.
 
@@ -56,7 +56,7 @@ Android packaging is NOT done via cargo: Gradle task `buildRustNative` runs `car
 
 ## Constraints and pitfalls
 
-- Server supports one streaming client at a time; Windows Firewall must allow inbound UDP 48400 (QUIC is UDP, not TCP).
+- Server streams to any number of receivers at once; each receiver costs another copy of the same PCM stream over Wi-Fi (about 1.5 Mbit/s per phone), so consumer AP airtime is the practical limit. Windows Firewall must allow inbound UDP 48400 (QUIC is UDP, not TCP).
 - Server binary only runs on Windows (WASAPI); it is a compile-time stub elsewhere.
 - `--capture-to` writes raw PCM (no WAV header): 48 kHz, stereo, i16 LE.
 - `.gitignore` excludes `target/`, `android/app/src/main/jniLibs/`, Gradle artifacts, `*.pcm`, `*.wav` — do not commit generated native libs.

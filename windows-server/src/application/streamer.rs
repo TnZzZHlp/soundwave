@@ -1,24 +1,16 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicU64, Ordering},
-};
-
 use anyhow::Context;
-use crossbeam_channel::bounded;
-use quinn::{Connection, Endpoint, VarInt};
+use quinn::{Endpoint, VarInt};
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::warn;
 
 use crate::{
-    audio::{capture::spawn_loopback_capture, device::default_render_device_info},
+    audio::{device::default_render_device_info, transmission::AudioTransmissionGate},
     config::{ServerArgs, default_identity_dir},
-    network::{
-        server::{self, AudioTransmissionGate, FRAME_QUEUE_CAPACITY, StreamCounters},
-        volume::VolumeAdjustment,
-    },
     pairing,
-    ui::{ServerUi, ServerUiInfo, ServerUiReporter},
+    ui::{ServerUi, ServerUiInfo},
 };
+
+use super::{hub::CaptureHub, registry::ReceiverRegistry, session};
 
 pub async fn run(args: ServerArgs) -> anyhow::Result<()> {
     let device =
@@ -29,7 +21,6 @@ pub async fn run(args: ServerArgs) -> anyhow::Result<()> {
         .unwrap_or_else(default_identity_dir);
     let (server_config, identity) =
         audio_stream_transport::load_or_create_server_config(&identity_dir)?;
-    let volume_adjustment = Arc::new(VolumeAdjustment::default());
     let endpoint = Endpoint::server(server_config, args.bind)
         .with_context(|| format!("could not bind QUIC UDP socket at {}", args.bind))?;
     let endpoint_address = endpoint
@@ -58,6 +49,8 @@ pub async fn run(args: ServerArgs) -> anyhow::Result<()> {
 
     let shutdown = CancellationToken::new();
     let transmission = AudioTransmissionGate::enabled();
+    let hub = CaptureHub::new(transmission.clone());
+    let registry = ReceiverRegistry::default();
     let signal_shutdown = shutdown.clone();
     tokio::spawn(async move {
         if tokio::signal::ctrl_c().await.is_ok() {
@@ -79,7 +72,7 @@ pub async fn run(args: ServerArgs) -> anyhow::Result<()> {
         },
         shutdown.clone(),
         transmission.clone(),
-        volume_adjustment.clone(),
+        registry.clone(),
     ) {
         Ok(ui) => Some(ui),
         Err(error) => {
@@ -89,6 +82,7 @@ pub async fn run(args: ServerArgs) -> anyhow::Result<()> {
     };
     let ui_reporter = ui.as_ref().map(ServerUi::reporter);
 
+    let mut sessions = tokio::task::JoinSet::new();
     loop {
         let incoming = tokio::select! {
             _ = shutdown.cancelled() => break,
@@ -98,26 +92,36 @@ pub async fn run(args: ServerArgs) -> anyhow::Result<()> {
             break;
         };
 
-        match incoming.await {
-            Ok(connection) => {
-                if let Err(error) = serve_client(
-                    connection,
-                    shutdown.clone(),
-                    ui_reporter.as_ref(),
-                    transmission.clone(),
-                    volume_adjustment.clone(),
-                )
-                .await
-                {
-                    warn!(%error, "client session ended with an error");
+        let hub = hub.clone();
+        let registry = registry.clone();
+        let server_shutdown = shutdown.clone();
+        let ui = ui_reporter.clone();
+        let transmission = transmission.clone();
+        // The handshake runs in the session task so a slow or stalled peer
+        // cannot delay accepting the next receiver.
+        sessions.spawn(async move {
+            let connection = match incoming.await {
+                Ok(connection) => connection,
+                Err(error) => {
+                    warn!(%error, "incoming QUIC connection was rejected");
+                    return;
                 }
-                if let Some(ui) = ui_reporter.as_ref() {
-                    ui.waiting_for_client();
-                }
+            };
+            if let Err(error) =
+                session::run(connection, hub, registry, server_shutdown, ui, transmission).await
+            {
+                warn!(%error, "receiver session ended with an error");
             }
-            Err(error) => warn!(%error, "incoming QUIC connection was rejected"),
-        }
+        });
+
+        // Reap finished sessions so their errors are observed and the set does
+        // not grow without bound over a long server lifetime.
+        while sessions.try_join_next().is_some() {}
     }
+
+    // Stopping the server closes every receiver connection; wait for the
+    // sessions to unwind so capture is joined before the endpoint goes idle.
+    sessions.shutdown().await;
 
     if let Some(ui) = ui.as_ref() {
         ui.shutdown();
@@ -125,88 +129,5 @@ pub async fn run(args: ServerArgs) -> anyhow::Result<()> {
     endpoint.close(VarInt::from_u32(0), b"server shutdown");
     endpoint.wait_idle().await;
     println!("Audio Stream Server stopped.");
-    Ok(())
-}
-
-async fn serve_client(
-    connection: Connection,
-    server_shutdown: CancellationToken,
-    ui: Option<&ServerUiReporter>,
-    transmission: AudioTransmissionGate,
-    volume_adjustment: Arc<VolumeAdjustment>,
-) -> anyhow::Result<()> {
-    let peer = connection.remote_address();
-    let session_stop = server_shutdown.child_token();
-    volume_adjustment.take();
-    let (mut control_writer, mut control_reader, frame_duration_ms) =
-        server::perform_handshake(&connection, &session_stop).await?;
-
-    let (frame_sender, frame_receiver) = bounded(FRAME_QUEUE_CAPACITY);
-    let counters = Arc::new(StreamCounters::default());
-    let (activity_sender, activity_receiver) = tokio::sync::mpsc::channel(8);
-    let capture_dropped = Arc::new(AtomicU64::new(0));
-    let capture = spawn_loopback_capture(
-        frame_sender,
-        frame_receiver.clone(),
-        session_stop.clone(),
-        capture_dropped.clone(),
-        transmission.clone(),
-    )
-    .context("could not start WASAPI loopback thread")?;
-    let network = server::spawn_datagram_sender(
-        connection.clone(),
-        frame_receiver,
-        frame_duration_ms,
-        session_stop.clone(),
-        counters.clone(),
-        transmission,
-        activity_sender,
-    )
-    .context("could not start QUIC packet thread")?;
-
-    if let Some(ui) = ui {
-        ui.streaming_to(peer);
-    }
-    println!("\nClient connected:\n{peer}\n\nStreaming...");
-    server::process_control_messages(
-        &mut control_reader,
-        &mut control_writer,
-        &connection,
-        &session_stop,
-        volume_adjustment,
-        activity_receiver,
-    )
-    .await;
-
-    session_stop.cancel();
-    connection.close(VarInt::from_u32(0), b"stream stopped");
-
-    let worker_result = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-        capture
-            .join()
-            .map_err(|_| anyhow::anyhow!("WASAPI capture thread panicked"))??;
-        network
-            .join()
-            .map_err(|_| anyhow::anyhow!("QUIC packet thread panicked"))??;
-        Ok(())
-    })
-    .await
-    .context("audio worker join task panicked")?;
-    if let Err(error) = worker_result {
-        warn!(%error, "audio worker ended with an error");
-    }
-
-    info!(
-        peer = %peer,
-        packets = counters.packets_sent.load(Ordering::Relaxed),
-        network_dropped = counters.packets_dropped.load(Ordering::Relaxed),
-        capture_dropped = capture_dropped.load(Ordering::Relaxed),
-        "client stream stopped"
-    );
-    println!(
-        "Client disconnected. Packets: {}  Dropped: {}",
-        counters.packets_sent.load(Ordering::Relaxed),
-        counters.packets_dropped.load(Ordering::Relaxed) + capture_dropped.load(Ordering::Relaxed),
-    );
     Ok(())
 }
