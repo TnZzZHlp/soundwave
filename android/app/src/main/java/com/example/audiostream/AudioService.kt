@@ -11,7 +11,6 @@ import android.net.wifi.WifiManager
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
-import android.os.Process
 import kotlin.math.abs
 import kotlin.math.max
 
@@ -185,20 +184,12 @@ class AudioService : Service() {
         playbackRunning = true
         audioTrack = track
         val thread = Thread({
-            Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
-            // Keep each blocking write to one 5 ms chunk instead of batching
-            // a whole platform buffer ahead of the speaker.
-            val output = ShortArray(FRAME_SAMPLES)
             try {
-                track.play()
-                while (playbackRunning && audioTrack === track) {
-                    NativeBridge.nativeReadPcm(output)
-                    val written = track.write(output, 0, output.size, AudioTrack.WRITE_BLOCKING)
-                    if (written < 0) {
-                        playbackRunning = false
-                        break
-                    }
+                AudioTrackPlayback.run(track, FRAME_SAMPLES) {
+                    playbackRunning && audioTrack === track
                 }
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
             } finally {
                 runCatching { track.pause() }
                 runCatching { track.flush() }

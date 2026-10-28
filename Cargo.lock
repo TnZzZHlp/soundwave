@@ -87,7 +87,7 @@ dependencies = [
 
 [[package]]
 name = "audio-stream-android"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arc-swap",
  "audio-stream-protocol",
@@ -102,7 +102,7 @@ dependencies = [
 
 [[package]]
 name = "audio-stream-protocol"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytes",
  "postcard",
@@ -112,7 +112,7 @@ dependencies = [
 
 [[package]]
 name = "audio-stream-server"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "audio-stream-protocol",
@@ -133,7 +133,7 @@ dependencies = [
 
 [[package]]
 name = "audio-stream-transport"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "audio-stream-protocol",
  "bytes",

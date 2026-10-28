@@ -18,6 +18,8 @@ object NativeBridge {
     external fun nativeGetState(): Int
     external fun nativeGetLatencyMs(): Long
     external fun nativeGetBufferMs(): Long
+    external fun nativeGetJitterBufferMs(): Long
+    external fun nativeGetBufferCapacityMs(): Long
     external fun nativeTakeVolumeAdjustment(): Int
     external fun nativeGetReceivedPackets(): Long
     external fun nativeGetLostPackets(): Long

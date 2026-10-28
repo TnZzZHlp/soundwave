@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use crossbeam_queue::ArrayQueue;
 
@@ -14,6 +14,8 @@ pub const PCM_RING_CAPACITY_SAMPLES: usize =
 pub struct PcmRingBuffer {
     queue: ArrayQueue<i16>,
     underruns: AtomicU64,
+    playback_target_samples: AtomicUsize,
+    buffering: AtomicBool,
 }
 
 impl PcmRingBuffer {
@@ -21,6 +23,8 @@ impl PcmRingBuffer {
         Self {
             queue: ArrayQueue::new(capacity_samples),
             underruns: AtomicU64::new(0),
+            playback_target_samples: AtomicUsize::new(0),
+            buffering: AtomicBool::new(false),
         }
     }
 
@@ -36,9 +40,29 @@ impl PcmRingBuffer {
         }
     }
 
+    pub fn set_playback_target(&self, samples: usize) {
+        self.playback_target_samples
+            .store(samples.min(self.queue.capacity()), Ordering::Release);
+    }
+
+    pub fn begin_buffering(&self) {
+        self.buffering.store(true, Ordering::Release);
+    }
+
     /// This is the entire native audio callback path: atomically pop or fill
     /// silence. It allocates nothing and does no I/O or locking.
     pub fn read_into(&self, output: &mut [i16]) -> usize {
+        if self.buffering.load(Ordering::Acquire) {
+            let required = self
+                .playback_target_samples
+                .load(Ordering::Acquire)
+                .max(output.len());
+            if self.queue.len() < required {
+                output.fill(0);
+                return 0;
+            }
+            self.buffering.store(false, Ordering::Release);
+        }
         let mut actual = 0;
         for sample in &mut *output {
             if let Some(value) = self.queue.pop() {
@@ -50,6 +74,9 @@ impl PcmRingBuffer {
         }
         if actual != output.len() {
             self.underruns.fetch_add(1, Ordering::Relaxed);
+            if self.playback_target_samples.load(Ordering::Acquire) > 0 {
+                self.begin_buffering();
+            }
         }
         actual
     }
@@ -79,6 +106,36 @@ impl PcmRingBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn playback_waits_for_prefill_without_counting_startup_underruns() {
+        let ring = PcmRingBuffer::new(8);
+        ring.set_playback_target(4);
+        ring.begin_buffering();
+        let mut output = [0; 2];
+        ring.write_pcm_le(&[1, 0, 2, 0]);
+        assert_eq!(ring.read_into(&mut output), 0);
+        assert_eq!(ring.available_samples(), 2);
+        assert_eq!(ring.underruns(), 0);
+        ring.write_pcm_le(&[3, 0, 4, 0]);
+        assert_eq!(ring.read_into(&mut output), 2);
+        assert_eq!(output, [1, 2]);
+    }
+
+    #[test]
+    fn playback_rebuffers_after_underrun_without_repeated_empty_reads() {
+        let ring = PcmRingBuffer::new(8);
+        ring.set_playback_target(4);
+        let mut output = [0; 2];
+        assert_eq!(ring.read_into(&mut output), 0);
+        assert_eq!(ring.underruns(), 1);
+        ring.write_pcm_le(&[1, 0, 2, 0]);
+        assert_eq!(ring.read_into(&mut output), 0);
+        assert_eq!(ring.underruns(), 1);
+        ring.write_pcm_le(&[3, 0, 4, 0]);
+        assert_eq!(ring.read_into(&mut output), 2);
+        assert_eq!(output, [1, 2]);
+    }
 
     #[test]
     fn ring_overwrites_oldest_and_silences_underrun() {

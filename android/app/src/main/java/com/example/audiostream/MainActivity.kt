@@ -29,7 +29,7 @@ class MainActivity : Activity() {
     private val refreshStatus = object : Runnable {
         override fun run() {
             renderNativeState()
-            handler.postDelayed(this, 1_000)
+            handler.postDelayed(this, 250)
         }
     }
 
@@ -132,7 +132,7 @@ class MainActivity : Activity() {
             else -> "Idle"
         }
         latencyValue.text = "Estimated latency: ${NativeBridge.nativeGetLatencyMs()} ms"
-        bufferValue.text = "Buffer: ${NativeBridge.nativeGetBufferMs()} ms"
+        bufferValue.text = "PCM buffer: ${NativeBridge.nativeGetBufferMs()} / ${NativeBridge.nativeGetBufferCapacityMs()} ms  target: ${NativeBridge.nativeGetJitterBufferMs()} ms"
         statisticsValue.text = "Packets: ${NativeBridge.nativeGetReceivedPackets()}  lost: ${NativeBridge.nativeGetLostPackets()}  late: ${NativeBridge.nativeGetLatePackets()}  underruns: ${NativeBridge.nativeGetUnderruns()}"
     }
 

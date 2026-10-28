@@ -167,6 +167,14 @@ pub fn buffer_duration_ms() -> u64 {
     })
 }
 
+pub fn jitter_buffer_ms() -> u64 {
+    if state() == ClientState::Connected {
+        with_state(SharedState::jitter_buffer_ms)
+    } else {
+        0
+    }
+}
+
 pub fn take_volume_adjustment() -> i32 {
     engine_slot()
         .lock()
@@ -295,6 +303,33 @@ pub extern "system" fn Java_com_example_audiostream_NativeBridge_nativeGetBuffer
 ) -> jlong {
     unowned_env
         .with_env(|_| -> jni::errors::Result<jlong> { Ok(to_jlong(buffer_duration_ms())) })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_example_audiostream_NativeBridge_nativeGetJitterBufferMs<'local>(
+    mut unowned_env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+) -> jlong {
+    unowned_env
+        .with_env(|_| -> jni::errors::Result<jlong> { Ok(to_jlong(jitter_buffer_ms())) })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_example_audiostream_NativeBridge_nativeGetBufferCapacityMs<
+    'local,
+>(
+    mut unowned_env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+) -> jlong {
+    unowned_env
+        .with_env(|_| -> jni::errors::Result<jlong> {
+            Ok(to_jlong(
+                PCM_RING_CAPACITY_SAMPLES as u64 * 1_000
+                    / (u64::from(SAMPLE_RATE) * u64::from(CHANNELS)),
+            ))
+        })
         .resolve::<ThrowRuntimeExAndDefault>()
 }
 

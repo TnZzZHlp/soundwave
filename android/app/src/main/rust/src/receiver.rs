@@ -64,6 +64,8 @@ impl ReceiverPipeline {
         state.set_jitter_buffer_ms(
             u64::try_from(frame_duration_ms * target_packets).unwrap_or(u64::MAX),
         );
+        ring.set_playback_target(target_packets * samples_per_packet);
+        ring.begin_buffering();
         let last_underruns = ring.underruns();
 
         Ok(Self {
@@ -116,6 +118,8 @@ impl ReceiverPipeline {
                 .increase_target(self.adjustment_packets, self.maximum_target_packets)
         {
             self.adaptation_cooldown_packets = self.cooldown_after_adjustment_packets;
+            self.ring
+                .set_playback_target(self.jitter.target_packets() * self.samples_per_packet);
             self.state.set_jitter_buffer_ms(
                 u64::try_from(self.frame_duration_ms * self.jitter.target_packets())
                     .unwrap_or(u64::MAX),
@@ -175,8 +179,9 @@ mod tests {
             pipeline.handle_packet(packet(sequence));
         }
         assert_eq!(state.jitter_buffer_ms(), 20);
+        let mut output = [0_i16; 480];
+        assert_eq!(ring.read_into(&mut output), 480);
         ring.clear();
-        let mut output = [0_i16; 1];
         ring.read_into(&mut output);
 
         pipeline.handle_packet(packet(4));
