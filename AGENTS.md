@@ -2,7 +2,7 @@
 
 ## Project overview
 
-Soundwave streams the Windows default output device (WASAPI loopback) as PCM to Android phones over LAN QUIC. Several receivers may listen at once: one shared WASAPI capture feeds an independent QUIC datagram stream per connection, with no hard receiver cap. V0.1 scope: no cloud, no accounts, no codec (Opus is planned later), no mDNS. After a drop, the client reconnects automatically with exponential backoff until the server returns or the user disconnects. See README.md for the full design rationale.
+Soundwave streams the Windows default output device (WASAPI loopback) as PCM to Android phones over LAN QUIC. Several receivers may listen at once: one shared WASAPI capture feeds an independent QUIC datagram stream per connection, with no hard receiver cap. V0.2 scope: no cloud, no accounts, no codec (Opus is planned later), no mDNS. After a drop, the client reconnects automatically with exponential backoff until the server returns or the user disconnects. See README.md for the full design rationale.
 
 Data flow: WASAPI loopback -> shared-mode conversion -> f32 -> i16 PCM -> bounded 10 ms capture queue -> broadcast fan-out -> per-receiver QUIC datagrams; Android client -> jitter buffer -> SPSC PCM ring -> Kotlin AudioTrack.
 
@@ -48,7 +48,7 @@ Android packaging is NOT done via cargo: Gradle task `buildRustNative` runs `car
 
 ## Architecture rules to preserve
 
-- Wire format: fixed 12-byte network-order header (`sequence u32 | timestamp u64`) + i16 LE PCM; control messages (Hello/StreamInfo/Start/Stop/Ping/Pong/AdjustVolume) are postcard on a reliable QUIC stream. `PROTOCOL_VERSION` lives in the protocol crate.
+- Wire format: fixed 12-byte network-order header (`sequence u32 | timestamp u64`) + i16 LE PCM; control messages (Hello/StreamInfo/Start/Stop/AdjustVolume/AudioIdle) are postcard on a reliable QUIC stream. `PROTOCOL_VERSION` lives in the protocol crate.
 - Bounded latency policy: if the capture queue or PCM ring is full, drop the oldest; underrun becomes silence. Never let buffering grow unbounded.
 - Datagram sizing: the server uses Quinn's advertised max datagram size and splits 10 ms capture blocks into 5/4/2/1 ms packets as needed; never assume an Ethernet MTU or rely on IP fragmentation.
 - Security: server generates a self-signed cert+key on first run in `%LOCALAPPDATA%\Soundwave` (or `--identity-dir`); the client pins the leaf SHA-256 fingerprint. A changed fingerprint is a pairing change, not a certificate error to paper over.

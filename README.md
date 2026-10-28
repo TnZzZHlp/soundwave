@@ -1,6 +1,6 @@
 # Soundwave — Windows to Android LAN audio
 
-Soundwave captures the current Windows output device with WASAPI loopback and streams PCM to Android phones over LAN QUIC. Several phones can listen at the same time; the server sends one independent QUIC datagram stream to each receiver. It is intentionally a small V0.1: no cloud service, accounts, WebRTC, RTP, virtual audio device, or codec is involved.
+Soundwave captures the current Windows output device with WASAPI loopback and streams PCM to Android phones over LAN QUIC. Several phones can listen at the same time; the server sends one independent QUIC datagram stream to each receiver. It is intentionally a small V0.2: no cloud service, accounts, WebRTC, RTP, virtual audio device, or codec is involved.
 
 ```text
 Windows system audio
@@ -232,11 +232,19 @@ Allow inbound **UDP 48400** for `audio-stream-server.exe`. QUIC uses UDP; openin
 | QR scan cannot start | Grant camera permission to the app and make sure no other app is holding the camera, or enter the host, port, and fingerprint manually. |
 | Certificate error | Copy the current server fingerprint exactly. Delete neither the server identity directory nor the app’s saved pairing unintentionally. |
 | No sound | Run `--capture-to capture.pcm` and inspect the raw file. Verify Windows is playing through its default output device. |
-| Immediate disconnect | Confirm the Android app and server use the same protocol version and that the phone can reach the entered IP address. |
+| Immediate disconnect | Confirm the Android app and server are both v0.2 (see [Upgrading](#upgrading)) and that the phone can reach the entered IP address. |
 | Repeating underruns or clicks | The client automatically increases its jitter target after underruns or late packets. If problems continue at the 100 ms cap, use a stronger Wi-Fi signal, disable power-saving restrictions, and avoid congested 2.4 GHz networks. |
 | High latency | Check the displayed buffer/loss counters. Persistent packet loss or ring overflow means the network/output cannot sustain the stream. |
+| One phone stutters while others are fine | Expected: each receiver has its own QUIC congestion control and drops only its own audio. Improve that phone's Wi-Fi signal or reduce interference. |
+| Many receivers stutter together | Every receiver costs another ~1.5 Mbit/s of the same PCM over the air, and they share one AP's airtime. The server logs a warning above four receivers; move to 5 GHz, or use fewer phones. |
 | Android native build fails | Ensure `cargo-ndk`, the matching NDK, and `aarch64-linux-android` Rust target are installed; then rebuild `buildRustNative`. |
 
-## Current V0.1 boundaries
+## Upgrading
+
+The current protocol version is 6. A server and app that disagree on it refuse the handshake, so upgrade both together: a v0.2 app cannot stream from a v0.1 server, and a v0.1 app cannot stream from a v0.2 server.
+
+Version 0.2 added multi-receiver streaming and idle-stream pausing, which raised `PROTOCOL_VERSION` from 5 to 6 for the `AudioIdle` control message. The Windows TLS identity in `%LOCALAPPDATA%\Soundwave` is unchanged by an upgrade, so the pairing QR code and the fingerprint already stored on each phone keep working.
+
+## Current V0.2 boundaries
 
 This project intentionally does not yet provide Opus, mDNS discovery, device selection, iOS/Linux/macOS support, public-Internet traversal, or accounts. PCM transport remains codec-neutral at the QUIC packet layer so an Opus encoder/decoder can be introduced later without replacing the control or datagram transport.
