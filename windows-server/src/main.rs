@@ -7,6 +7,8 @@ mod application;
 mod audio;
 #[cfg(windows)]
 mod config;
+#[cfg(any(windows, test))]
+mod loudness;
 #[cfg(windows)]
 mod network;
 #[cfg(windows)]

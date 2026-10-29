@@ -5,7 +5,7 @@ use std::{
 };
 
 use arc_swap::ArcSwapOption;
-use audio_stream_protocol::{CHANNELS, SAMPLE_RATE};
+use audio_stream_protocol::{CHANNELS, DeviceStatus, SAMPLE_RATE};
 use jni::{
     EnvUnowned,
     errors::ThrowRuntimeExAndDefault,
@@ -21,6 +21,7 @@ use crate::{
     state::{ClientState, SharedState},
 };
 
+static ACTIVE_STATE: ArcSwapOption<SharedState> = ArcSwapOption::const_empty();
 static ACTIVE_RING: ArcSwapOption<PcmRingBuffer> = ArcSwapOption::const_empty();
 static ENGINE: OnceLock<Mutex<Option<NativeEngine>>> = OnceLock::new();
 
@@ -78,6 +79,7 @@ pub fn connect(host: &str, port: u16, fingerprint_text: &str) -> Result<(), Clie
 
     let ring = Arc::new(PcmRingBuffer::new(PCM_RING_CAPACITY_SAMPLES));
     ACTIVE_RING.store(Some(ring.clone()));
+    ACTIVE_STATE.store(Some(engine.state.clone()));
     engine.state.begin_connecting();
     let task = engine.runtime.spawn(client::run_session(
         address,
@@ -122,6 +124,12 @@ pub fn shutdown() {
 }
 
 pub fn read_pcm(output: &mut [i16]) -> usize {
+    if ACTIVE_STATE
+        .load_full()
+        .is_some_and(|state| state.device.read_tone(output))
+    {
+        return output.len();
+    }
     if let Some(ring) = ACTIVE_RING.load_full() {
         ring.read_into(output)
     } else {
@@ -297,7 +305,11 @@ pub extern "system" fn Java_com_example_audiostream_NativeBridge_nativeIsAudioAc
             Ok(engine_slot()
                 .lock()
                 .ok()
-                .and_then(|slot| slot.as_ref().map(|engine| engine.state.audio_active()))
+                .and_then(|slot| {
+                    slot.as_ref().map(|engine| {
+                        engine.state.audio_active() || engine.state.device.tone_active()
+                    })
+                })
                 .unwrap_or(false))
         })
         .resolve::<ThrowRuntimeExAndDefault>()
@@ -431,6 +443,76 @@ pub extern "system" fn Java_com_example_audiostream_NativeBridge_nativeGetLastEr
     unowned_env
         .with_env(|env| JString::from_str(env, last_error()))
         .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_example_audiostream_NativeBridge_nativeStopTestTone<'local>(
+    mut unowned_env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+) {
+    unowned_env
+        .with_env(|_| -> jni::errors::Result<()> {
+            if let Some(state) = ACTIVE_STATE.load_full() {
+                state.device.set_tone(false);
+                state.notify_changed();
+            }
+            Ok(())
+        })
+        .resolve::<ThrowRuntimeExAndDefault>();
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_example_audiostream_NativeBridge_nativeTakeDeviceCommand<'local>(
+    mut unowned_env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+) -> jlong {
+    unowned_env
+        .with_env(|_| -> jni::errors::Result<jlong> {
+            Ok(ACTIVE_STATE.load_full().map_or(0, |state| {
+                jlong::try_from(state.device.take_command()).unwrap_or(0)
+            }))
+        })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_example_audiostream_NativeBridge_nativeReportDevice<'local>(
+    mut unowned_env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    request_id: jlong,
+    device_id: JString<'local>,
+    name: JString<'local>,
+    values: jlong,
+) {
+    unowned_env
+        .with_env(|env| -> jni::errors::Result<()> {
+            let device_id = device_id
+                .mutf8_chars(env)?
+                .to_str()
+                .chars()
+                .take(80)
+                .collect();
+            let name = name.mutf8_chars(env)?.to_str().chars().take(80).collect();
+            if let Some(state) = ACTIVE_STATE
+                .load_full()
+                .filter(|s| s.state() == ClientState::Connected)
+            {
+                let values = u64::try_from(values).unwrap_or(0);
+                state.device.report(DeviceStatus {
+                    request_id: u32::try_from(request_id).unwrap_or(0),
+                    device_id,
+                    name,
+                    volume: u16::try_from(values & 0xffff).unwrap_or(0),
+                    minimum: u16::try_from((values >> 16) & 0xffff).unwrap_or(0),
+                    maximum: u16::try_from((values >> 32) & 0xffff).unwrap_or(0),
+                    fixed: values & (1 << 48) != 0,
+                    speaker: values & (1 << 49) != 0,
+                    failed: values & (1 << 50) != 0,
+                });
+            }
+            Ok(())
+        })
+        .resolve::<ThrowRuntimeExAndDefault>();
 }
 
 #[unsafe(no_mangle)]

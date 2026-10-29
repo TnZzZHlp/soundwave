@@ -350,11 +350,17 @@ pub async fn process_control_messages(
     connection: &Connection,
     stop: &CancellationToken,
     mut outbound: tokio::sync::mpsc::Receiver<ControlMessage>,
+    registry: &crate::application::registry::ReceiverRegistry,
+    receiver_id: u64,
 ) {
+    let mut query_tick = tokio::time::interval(std::time::Duration::from_secs(1));
     loop {
         tokio::select! {
             _ = stop.cancelled() => break,
             _ = connection.closed() => break,
+            _ = query_tick.tick() => {
+                if writer.send(&ControlMessage::QueryDevice { request_id: 0 }).await.is_err() { break; }
+            }
             Some(message) = outbound.recv() => {
                 if let Err(error) = writer.send(&message).await {
                     warn!(%error, "failed to send a server control message");
@@ -366,6 +372,7 @@ pub async fn process_control_messages(
                     debug!("client requested stream stop");
                     break;
                 }
+                Ok(ControlMessage::DeviceStatus(status)) => registry.update_device(receiver_id, status),
                 Ok(message) => debug!(?message, "ignoring unexpected client control message"),
                 Err(error) => {
                     debug!(%error, "control stream closed");

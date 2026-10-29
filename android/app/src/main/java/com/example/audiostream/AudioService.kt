@@ -40,6 +40,7 @@ class AudioService : Service() {
     private var currentServer = ""
     private var lastNotifiedState = Int.MIN_VALUE
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val deviceVolume by lazy { DeviceVolumeControl(this) }
 
     @Volatile private var statusThread: Thread? = null
 
@@ -105,11 +106,13 @@ class AudioService : Service() {
         statusThread = null
         stopPlayback()
         releaseWifiLock()
+        deviceVolume.close()
         NativeBridge.nativeShutdown()
         super.onDestroy()
     }
 
     private fun connect(host: String, port: Int, fingerprint: String) {
+        deviceVolume.cancelCalibration()
         if (host.isBlank() || fingerprint.isBlank() || !NativeBridge.nativeConnect(host, port, fingerprint)) {
             currentServer = host.ifBlank { "Windows server" }
             startForeground(
@@ -132,6 +135,7 @@ class AudioService : Service() {
     }
 
     private fun disconnectAndStop() {
+        deviceVolume.cancelCalibration()
         reconnectRequested = false
         lastNotifiedState = Int.MIN_VALUE
         statusThread = null
@@ -143,7 +147,9 @@ class AudioService : Service() {
     }
 
     private fun syncStreamingResources(state: Int) {
+        if (state != NativeBridge.STATE_CONNECTED) deviceVolume.cancelCalibration()
         if (reconnectRequested && state == NativeBridge.STATE_CONNECTED) {
+            deviceVolume.applyPending()
             applyVolumeAdjustment()
         }
         if (reconnectRequested && state == NativeBridge.STATE_CONNECTED && NativeBridge.nativeIsAudioActive()) {

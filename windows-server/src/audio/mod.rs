@@ -1,6 +1,7 @@
 pub mod capture;
 pub mod convert;
 pub mod device;
+pub mod microphone;
 pub mod transmission;
 
 use audio_stream_protocol::{CHANNELS, SAMPLE_RATE};

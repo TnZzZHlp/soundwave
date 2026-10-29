@@ -60,6 +60,8 @@ pub async fn run(
         &connection,
         &session_stop,
         control_receiver,
+        &registry,
+        guard.id(),
     )
     .await;
 

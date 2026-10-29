@@ -107,8 +107,22 @@ async fn connected_loop(
     let datagrams = DatagramReceiver::new(connection.clone())?;
     state.set(ClientState::Connected);
 
+    let mut device_tick = tokio::time::interval(Duration::from_millis(250));
+    let mut tone_was_active = false;
     loop {
         tokio::select! {
+            _ = device_tick.tick() => {
+                let active = state.device.tone_active();
+                if active != tone_was_active {
+                    tone_was_active = active;
+                    state.notify_changed();
+                }
+            }
+            () = state.device.report_ready.notified() => {
+                while let Some(report) = state.device.take_report() {
+                    writer.send(&report).await?;
+                }
+            }
             _ = connection.closed() => return Ok(()),
             _ = tokio::time::sleep_until(idle_deadline.unwrap_or_else(tokio::time::Instant::now)), if idle_deadline.is_some() => {
                 idle_deadline = None;
@@ -144,6 +158,35 @@ async fn connected_loop(
                             idle_boundary = Some(next_sequence);
                             idle_deadline = Some(tokio::time::Instant::now() + Duration::from_millis(150));
                         }
+                    }
+                    ControlMessage::QueryDevice { request_id } => {
+                        if !state.device.enqueue(request_id, None) {
+                            return Err(ClientError::Runtime("device command queue full".to_owned()));
+                        }
+                        state.notify_changed();
+                    }
+                    ControlMessage::SetVolume { request_id, index, purpose } => {
+                        use audio_stream_protocol::VolumePurpose;
+                        let operation = match purpose { VolumePurpose::User => 2, VolumePurpose::Calibration => 6, VolumePurpose::RestoreSpeaker => 7 };
+                        let queued = state.device.enqueue_operation(request_id, operation, index);
+                        if !queued {
+                            return Err(ClientError::Runtime("device command queue full".to_owned()));
+                        }
+                        state.notify_changed();
+                    }
+                    ControlMessage::CalibrationSession { request_id, action } => {
+                        use audio_stream_protocol::CalibrationAction;
+                        let (operation, value) = match action { CalibrationAction::Begin => (3, 0), CalibrationAction::Cancel => (4, 0), CalibrationAction::Commit { index } => (5, index) };
+                        if action != CalibrationAction::Begin { state.device.set_tone(false); }
+                        if !state.device.enqueue_operation(request_id, operation, value) {
+                            return Err(ClientError::Runtime("device command queue full".into()));
+                        }
+                        state.notify_changed();
+                    }
+                    ControlMessage::CalibrationTone { enabled } => {
+                        ring.clear();
+                        state.device.set_tone(enabled);
+                        state.notify_changed();
                     }
                     ControlMessage::AdjustVolume { steps } => {
                         state.add_volume_adjustment(steps);
@@ -356,6 +399,22 @@ mod tests {
                 .await
                 .unwrap();
 
+            writer
+                .send(&ControlMessage::SetVolume {
+                    request_id: 56,
+                    index: 4,
+                    purpose: audio_stream_protocol::VolumePurpose::User,
+                })
+                .await
+                .unwrap();
+            let report = tokio::time::timeout(Duration::from_secs(2), reader.receive())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                matches!(report, ControlMessage::DeviceStatus(status) if status.request_id == 56 && status.volume == 4)
+            );
+
             let sender = DatagramSender::new(connection.clone()).unwrap();
             let payload = vec![0_u8; 960];
             for sequence in 0..20 {
@@ -401,6 +460,22 @@ mod tests {
             let mut volume_adjustment = 0;
             loop {
                 volume_adjustment += state.take_volume_adjustment();
+                let command = state.device.take_command();
+                if command != 0 {
+                    assert_eq!(command >> 24, 56);
+                    assert_eq!(command & 0xffff, 4);
+                    state.device.report(audio_stream_protocol::DeviceStatus {
+                        request_id: 56,
+                        device_id: "test-device".into(),
+                        name: "Test phone".into(),
+                        volume: 4,
+                        minimum: 0,
+                        maximum: 15,
+                        fixed: false,
+                        speaker: true,
+                        failed: false,
+                    });
+                }
                 if state.received_packets() >= 12
                     && ring.available_samples() >= PCM_RING_CAPACITY_SAMPLES
                     && volume_adjustment != 0

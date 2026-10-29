@@ -23,6 +23,9 @@ object NativeBridge {
     external fun nativeGetJitterBufferMs(): Long
     external fun nativeGetBufferCapacityMs(): Long
     external fun nativeTakeVolumeAdjustment(): Int
+    external fun nativeStopTestTone()
+    external fun nativeTakeDeviceCommand(): Long
+    external fun nativeReportDevice(requestId: Long, deviceId: String, name: String, values: Long)
     external fun nativeGetReceivedPackets(): Long
     external fun nativeGetLostPackets(): Long
     external fun nativeGetLatePackets(): Long

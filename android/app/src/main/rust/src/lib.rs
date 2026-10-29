@@ -4,6 +4,7 @@
 //! this crate owns QUIC, packet validation, jitter handling, and the PCM ring.
 
 mod client;
+mod device_control;
 mod error;
 mod jitter;
 mod jni;

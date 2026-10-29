@@ -9,6 +9,7 @@ mod error;
 
 pub use audio::{AUDIO_PACKET_HEADER_LEN, AudioPacket};
 pub use control::{
-    CHANNELS, ControlMessage, PROTOCOL_VERSION, SAMPLE_RATE, SampleFormat, StreamInfo,
+    CALIBRATION_FREQUENCIES, CHANNELS, CalibrationAction, ControlMessage, DeviceStatus,
+    PROTOCOL_VERSION, SAMPLE_RATE, SampleFormat, StreamInfo, VolumePurpose,
 };
 pub use error::{ControlError, PacketError};

@@ -1,3 +1,5 @@
+mod volume;
+
 use std::{
     cell::RefCell,
     ffi::c_void,
@@ -60,6 +62,7 @@ const COMMAND_TOGGLE_SERVICE: u16 = 4;
 const COMMAND_EXIT: u16 = 5;
 const COMMAND_VOLUME_UP: u16 = 6;
 const COMMAND_VOLUME_DOWN: u16 = 7;
+const COMMAND_DEVICE_VOLUME: u16 = 8;
 
 /// Immutable server details displayed by the Windows status UI.
 #[derive(Clone)]
@@ -103,6 +106,7 @@ struct UiContext {
     shutdown: CancellationToken,
     transmission: AudioTransmissionGate,
     registry: ReceiverRegistry,
+    calibration: crate::application::calibration::CalibrationController,
     receiver: Receiver<UiCommand>,
     status_label: Option<HWND>,
     qr_matrix: Option<QrCode>,
@@ -259,7 +263,11 @@ fn run_ui_thread(
     ready_sender: SyncSender<Result<(), String>>,
 ) {
     UI_CONTEXT.with(|context| {
+        let calibration = crate::application::calibration::CalibrationController::load(
+            &info.identity_dir.join("volume-calibration.txt"),
+        );
         *context.borrow_mut() = Some(UiContext {
+            calibration,
             info,
             status: UiStatus::WaitingForClient,
             shutdown,
@@ -431,7 +439,7 @@ unsafe extern "system" fn window_proc(
         TRAY_CALLBACK_MESSAGE => {
             match (lparam.0 as u32) & 0xffff {
                 WM_CONTEXTMENU | WM_RBUTTONUP => show_context_menu(hwnd),
-                WM_LBUTTONUP | NIN_SELECT => show_dashboard(hwnd),
+                WM_LBUTTONUP | NIN_SELECT => volume::show(hwnd),
                 _ => {}
             }
             LRESULT(0)
@@ -578,6 +586,7 @@ fn handle_command(hwnd: HWND, command: u16) {
         COMMAND_SERVER_INFORMATION => show_server_information(hwnd),
         COMMAND_SETTINGS => show_settings(hwnd),
         COMMAND_TOGGLE_SERVICE => toggle_audio_transmission(),
+        COMMAND_DEVICE_VOLUME => volume::show(hwnd),
         COMMAND_VOLUME_UP => adjust_client_volume(1),
         COMMAND_VOLUME_DOWN => adjust_client_volume(-1),
         COMMAND_EXIT => request_shutdown(hwnd),
@@ -589,6 +598,9 @@ fn toggle_audio_transmission() {
     let Some((enabled, status_label)) = UI_CONTEXT.with(|context| {
         let mut context = context.borrow_mut();
         let context = context.as_mut()?;
+        if context.calibration.status().0 {
+            return None;
+        }
         let enabled = !context.transmission.is_enabled();
         context.transmission.set_enabled(enabled);
         let status_label = context
@@ -614,7 +626,7 @@ fn adjust_client_volume(steps: i32) {
         let Some(context) = context.as_ref() else {
             return;
         };
-        if context.registry.len() == 0 {
+        if context.registry.len() == 0 || !context.calibration.can_adjust() {
             return;
         }
         let steps = steps.clamp(i32::from(i8::MIN), i32::from(i8::MAX)) as i8;
@@ -656,8 +668,8 @@ fn show_context_menu(hwnd: HWND) {
         AppendMenuW(
             menu,
             MF_STRING,
-            COMMAND_SHOW_SERVER as usize,
-            w!("Show server"),
+            COMMAND_DEVICE_VOLUME as usize,
+            w!("Device volume..."),
         )
         .and_then(|()| {
             AppendMenuW(
@@ -681,6 +693,14 @@ fn show_context_menu(hwnd: HWND) {
                 MF_STRING,
                 COMMAND_VOLUME_DOWN as usize,
                 w!("Decrease phone volume"),
+            )
+        })
+        .and_then(|()| {
+            AppendMenuW(
+                menu,
+                MF_STRING,
+                COMMAND_SHOW_SERVER as usize,
+                w!("Show server"),
             )
         })
         .and_then(|()| AppendMenuW(menu, MF_SEPARATOR, 0, w!("")))

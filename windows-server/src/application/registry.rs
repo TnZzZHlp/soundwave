@@ -1,13 +1,23 @@
 use std::{
     collections::BTreeMap,
     net::SocketAddr,
+    sync::atomic::{AtomicU32, Ordering},
     sync::{Arc, Mutex, MutexGuard},
 };
 
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
-use audio_stream_protocol::ControlMessage;
+use audio_stream_protocol::{CalibrationAction, ControlMessage, DeviceStatus, VolumePurpose};
+
+static NEXT_REQUEST: AtomicU32 = AtomicU32::new(1);
+
+#[derive(Clone)]
+pub struct ReceiverSnapshot {
+    pub id: u64,
+    pub peer: SocketAddr,
+    pub device: Option<DeviceStatus>,
+}
 
 /// Receiver count above which consumer Wi-Fi airtime is likely to degrade.
 ///
@@ -32,6 +42,8 @@ struct RegistryState {
 struct Receiver {
     peer: SocketAddr,
     controls: mpsc::Sender<ControlMessage>,
+    device: Option<DeviceStatus>,
+    replies: BTreeMap<u32, DeviceStatus>,
 }
 
 /// A registered receiver; dropping it removes the receiver from the registry.
@@ -52,7 +64,15 @@ impl ReceiverRegistry {
             let mut state = self.lock();
             let id = state.next_id;
             state.next_id = state.next_id.wrapping_add(1);
-            state.receivers.insert(id, Receiver { peer, controls });
+            state.receivers.insert(
+                id,
+                Receiver {
+                    peer,
+                    controls,
+                    device: None,
+                    replies: BTreeMap::new(),
+                },
+            );
             (id, state.receivers.len())
         };
 
@@ -99,6 +119,123 @@ impl ReceiverRegistry {
         }
     }
 
+    pub fn snapshots(&self) -> Vec<ReceiverSnapshot> {
+        self.lock()
+            .receivers
+            .iter()
+            .map(|(&id, r)| ReceiverSnapshot {
+                id,
+                peer: r.peer,
+                device: r.device.clone(),
+            })
+            .collect()
+    }
+
+    pub fn send(&self, id: u64, message: ControlMessage) -> anyhow::Result<()> {
+        let controls = self
+            .lock()
+            .receivers
+            .get(&id)
+            .map(|r| r.controls.clone())
+            .ok_or_else(|| anyhow::anyhow!("device disconnected"))?;
+        controls
+            .try_send(message)
+            .map_err(|e| anyhow::anyhow!("could not queue device command: {e}"))
+    }
+
+    pub fn request(&self, id: u64, index: Option<u16>) -> anyhow::Result<u32> {
+        let request_id = NEXT_REQUEST.fetch_add(1, Ordering::Relaxed).max(1);
+        self.send(
+            id,
+            match index {
+                Some(index) => ControlMessage::SetVolume {
+                    request_id,
+                    index,
+                    purpose: VolumePurpose::User,
+                },
+                None => ControlMessage::QueryDevice { request_id },
+            },
+        )?;
+        Ok(request_id)
+    }
+
+    pub fn calibration_volume_request(&self, id: u64, index: u16) -> anyhow::Result<u32> {
+        let request_id = NEXT_REQUEST.fetch_add(1, Ordering::Relaxed).max(1);
+        self.send(
+            id,
+            ControlMessage::SetVolume {
+                request_id,
+                index,
+                purpose: VolumePurpose::Calibration,
+            },
+        )?;
+        Ok(request_id)
+    }
+
+    pub fn restore_volume_request(&self, id: u64, index: u16) -> anyhow::Result<u32> {
+        let request_id = NEXT_REQUEST.fetch_add(1, Ordering::Relaxed).max(1);
+        self.send(
+            id,
+            ControlMessage::SetVolume {
+                request_id,
+                index,
+                purpose: VolumePurpose::RestoreSpeaker,
+            },
+        )?;
+        Ok(request_id)
+    }
+
+    pub fn calibration_request(&self, id: u64, action: CalibrationAction) -> anyhow::Result<u32> {
+        let request_id = NEXT_REQUEST.fetch_add(1, Ordering::Relaxed).max(1);
+        self.send(
+            id,
+            ControlMessage::CalibrationSession { request_id, action },
+        )?;
+        Ok(request_id)
+    }
+
+    pub fn take_reply(&self, id: u64, request_id: u32) -> Option<DeviceStatus> {
+        self.lock()
+            .receivers
+            .get_mut(&id)?
+            .replies
+            .remove(&request_id)
+    }
+
+    pub fn update_device(&self, id: u64, mut status: DeviceStatus) {
+        if status.minimum > status.maximum
+            || status.volume > status.maximum
+            || status.volume < status.minimum
+            || status.maximum > 512
+        {
+            return;
+        }
+        status.name = status
+            .name
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(80)
+            .collect();
+        status.device_id = status
+            .device_id
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+            .take(80)
+            .collect();
+        let mut state = self.lock();
+        if let Some(receiver) = state.receivers.get_mut(&id) {
+            receiver.device = Some(status.clone());
+            if status.request_id != 0 {
+                if receiver.replies.len() >= 32 {
+                    if let Some(oldest) = receiver.replies.keys().next().copied() {
+                        receiver.replies.remove(&oldest);
+                    }
+                }
+                receiver.replies.insert(status.request_id, status);
+            }
+        }
+    }
+
     /// Returns the connected receiver addresses in connect order.
     pub fn peers(&self) -> Vec<SocketAddr> {
         self.lock()
@@ -129,6 +266,12 @@ impl ReceiverRegistry {
 
     fn lock(&self) -> MutexGuard<'_, RegistryState> {
         self.inner.lock().unwrap_or_else(|error| error.into_inner())
+    }
+}
+
+impl ReceiverGuard {
+    pub fn id(&self) -> u64 {
+        self.id
     }
 }
 

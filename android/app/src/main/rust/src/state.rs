@@ -41,6 +41,7 @@ pub struct SharedState {
     rtt_ms: AtomicU64,
     jitter_buffer_ms: AtomicU64,
     volume_adjustment: Mutex<i32>,
+    pub device: crate::device_control::DeviceControl,
     last_error: Mutex<String>,
 }
 
@@ -57,6 +58,7 @@ impl Default for SharedState {
             rtt_ms: AtomicU64::new(0),
             jitter_buffer_ms: AtomicU64::new(0),
             volume_adjustment: Mutex::new(0),
+            device: crate::device_control::DeviceControl::default(),
             last_error: Mutex::new(String::new()),
         }
     }
@@ -79,6 +81,8 @@ impl SharedState {
     pub fn set(&self, state: ClientState) {
         if state != ClientState::Connected {
             self.set_audio_active(false);
+            self.take_volume_adjustment();
+            self.device.reset();
         }
         if self.state.swap(state as i32, Ordering::AcqRel) != state as i32 {
             self.notify_changed();
@@ -109,7 +113,7 @@ impl SharedState {
         *revision
     }
 
-    fn notify_changed(&self) {
+    pub fn notify_changed(&self) {
         let mut revision = self
             .revision
             .lock()
