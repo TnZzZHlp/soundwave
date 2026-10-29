@@ -105,9 +105,9 @@ internal class DeviceVolumeControl(context: Context) {
 
     private fun minimum(): Int = if (Build.VERSION.SDK_INT >= 28) manager.getStreamMinVolume(AudioManager.STREAM_MUSIC) else 0
 
-    private fun speakerOnly(): Boolean = manager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).all {
-        it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER || it.type == AudioDeviceInfo.TYPE_BUILTIN_EARPIECE
-    }
+    private fun speakerOnly(): Boolean = CalibrationOutputPolicy.isSpeakerOnly(
+        manager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).map { it.type }.toIntArray(),
+    )
 
     private fun report(requestId: Long, failed: Boolean) {
         try {
