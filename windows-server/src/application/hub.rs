@@ -163,12 +163,15 @@ impl CaptureHub {
     }
 }
 
-impl Drop for CaptureHub {
+impl Drop for HubInner {
     fn drop(&mut self) {
-        let capture = { self.lock().capture.take() };
-        if let Some(capture) = capture {
+        let state = self
+            .state
+            .get_mut()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(capture) = state.capture.take() {
             capture.stop.cancel();
-            let _ = Self::join_capture(capture);
+            let _ = CaptureHub::join_capture(capture);
         }
     }
 }
@@ -235,6 +238,53 @@ mod tests {
             Ok(())
         });
         CaptureHandle::new(stop, thread, blocks)
+    }
+
+    #[test]
+    fn reconnecting_receiver_keeps_capture_running_for_the_other_receiver() {
+        let starts = Arc::new(AtomicUsize::new(0));
+        let starter_count = starts.clone();
+        let hub = CaptureHub::with_starter(Arc::new(AtomicU64::new(0)), move || {
+            let (blocks, _) = broadcast::channel(2);
+            Ok(fake_capture(starter_count.clone(), blocks))
+        });
+        let mut first = hub.subscribe().unwrap();
+        let second_hub = hub.clone();
+        let second = second_hub.subscribe().unwrap();
+        let (stop, blocks) = {
+            let state = hub.lock();
+            let capture = state.capture.as_ref().unwrap();
+            (capture.stop.clone(), capture.blocks.clone())
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        drop(second);
+        runtime.block_on(second_hub.unsubscribe());
+        drop(second_hub);
+        assert!(!stop.is_cancelled());
+
+        let reconnected_hub = hub.clone();
+        let mut reconnected = reconnected_hub.subscribe().unwrap();
+        assert_eq!(starts.load(Ordering::Relaxed), 1);
+        blocks
+            .send(Arc::new(PcmBlock {
+                timestamp: 42,
+                samples: [1; PcmBlock::SAMPLE_COUNT],
+            }))
+            .unwrap();
+        assert_eq!(first.try_recv().unwrap().timestamp, 42);
+        assert_eq!(reconnected.try_recv().unwrap().timestamp, 42);
+
+        drop(reconnected);
+        runtime.block_on(reconnected_hub.unsubscribe());
+        drop(reconnected_hub);
+        assert!(!stop.is_cancelled());
+        drop(first);
+        runtime.block_on(hub.unsubscribe());
+        assert!(stop.is_cancelled());
     }
 
     #[test]
