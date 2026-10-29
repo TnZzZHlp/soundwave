@@ -24,6 +24,8 @@ object NativeBridge {
     external fun nativeGetBufferCapacityMs(): Long
     external fun nativeTakeVolumeAdjustment(): Int
     external fun nativeStopTestTone()
+    external fun nativeGetPlaybackRequest(): Long
+    external fun nativeReportPlayback(request: Long, playing: Boolean)
     external fun nativeTakeDeviceCommand(): Long
     external fun nativeReportDevice(requestId: Long, deviceId: String, name: String, values: Long)
     external fun nativeGetReceivedPackets(): Long

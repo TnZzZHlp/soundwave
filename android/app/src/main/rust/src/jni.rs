@@ -462,6 +462,41 @@ pub extern "system" fn Java_com_example_audiostream_NativeBridge_nativeStopTestT
 }
 
 #[unsafe(no_mangle)]
+pub extern "system" fn Java_com_example_audiostream_NativeBridge_nativeGetPlaybackRequest<
+    'local,
+>(
+    mut unowned_env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+) -> jlong {
+    unowned_env
+        .with_env(|_| -> jni::errors::Result<jlong> {
+            Ok(ACTIVE_STATE.load_full().map_or(0, |state| {
+                jlong::try_from(state.device.playback_request()).unwrap_or(0)
+            }))
+        })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_example_audiostream_NativeBridge_nativeReportPlayback<'local>(
+    mut unowned_env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    request: jlong,
+    playing: jboolean,
+) {
+    unowned_env
+        .with_env(|_| -> jni::errors::Result<()> {
+            if let Some(state) = ACTIVE_STATE.load_full() {
+                state
+                    .device
+                    .report_playback(u64::try_from(request).unwrap_or(0), playing);
+            }
+            Ok(())
+        })
+        .resolve::<ThrowRuntimeExAndDefault>();
+}
+
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_com_example_audiostream_NativeBridge_nativeTakeDeviceCommand<'local>(
     mut unowned_env: EnvUnowned<'local>,
     _class: JClass<'local>,

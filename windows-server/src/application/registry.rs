@@ -44,6 +44,7 @@ struct Receiver {
     controls: mpsc::Sender<ControlMessage>,
     device: Option<DeviceStatus>,
     replies: BTreeMap<u32, DeviceStatus>,
+    tone_replies: BTreeMap<u32, (bool, bool)>,
 }
 
 /// A registered receiver; dropping it removes the receiver from the registry.
@@ -71,6 +72,7 @@ impl ReceiverRegistry {
                     controls,
                     device: None,
                     replies: BTreeMap::new(),
+                    tone_replies: BTreeMap::new(),
                 },
             );
             (id, state.receivers.len())
@@ -192,6 +194,39 @@ impl ReceiverRegistry {
             ControlMessage::CalibrationSession { request_id, action },
         )?;
         Ok(request_id)
+    }
+
+    pub fn tone_request(&self, id: u64, enabled: bool) -> anyhow::Result<u32> {
+        let request_id = NEXT_REQUEST.fetch_add(1, Ordering::Relaxed).max(1);
+        self.send(
+            id,
+            ControlMessage::CalibrationTone {
+                request_id,
+                enabled,
+            },
+        )?;
+        Ok(request_id)
+    }
+
+    pub fn update_tone(&self, id: u64, request_id: u32, playing: bool, failed: bool) {
+        if request_id == 0 {
+            return;
+        }
+        let mut state = self.lock();
+        if let Some(receiver) = state.receivers.get_mut(&id) {
+            if receiver.tone_replies.len() >= 32 {
+                receiver.tone_replies.pop_first();
+            }
+            receiver.tone_replies.insert(request_id, (playing, failed));
+        }
+    }
+
+    pub fn take_tone_reply(&self, id: u64, request_id: u32) -> Option<(bool, bool)> {
+        self.lock()
+            .receivers
+            .get_mut(&id)?
+            .tone_replies
+            .remove(&request_id)
     }
 
     pub fn take_reply(&self, id: u64, request_id: u32) -> Option<DeviceStatus> {

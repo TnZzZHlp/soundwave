@@ -13,7 +13,10 @@ use tokio_util::sync::CancellationToken;
 
 use super::registry::{ReceiverRegistry, ReceiverSnapshot};
 use crate::{
-    audio::{microphone::Microphone, transmission::AudioTransmissionGate},
+    audio::{
+        microphone::{Measurement, Microphone},
+        transmission::AudioTransmissionGate,
+    },
     loudness::{closest_step, signal_level},
 };
 
@@ -145,7 +148,11 @@ impl CalibrationController {
             let Some(device) = receiver.device else {
                 continue;
             };
-            if device.fixed {
+            if device.fixed || device.failed {
+                errors.push(format!(
+                    "{}: system volume is unavailable or the last request failed; skipped",
+                    device.name
+                ));
                 continue;
             }
             let calibrated = state.settings.iter().find(|s| {
@@ -228,7 +235,10 @@ impl Drop for PlaybackPause<'_> {
     fn drop(&mut self) {
         self.request
             .registry
-            .broadcast(ControlMessage::CalibrationTone { enabled: false });
+            .broadcast(ControlMessage::CalibrationTone {
+                request_id: 0,
+                enabled: false,
+            });
         self.request
             .registry
             .broadcast(ControlMessage::CalibrationSession {
@@ -247,9 +257,10 @@ fn run(
 ) -> Result<()> {
     request.transmission.set_calibrating(true);
     let _pause = PlaybackPause { request };
-    request
-        .registry
-        .broadcast(ControlMessage::CalibrationTone { enabled: false });
+    request.registry.broadcast(ControlMessage::CalibrationTone {
+        request_id: 0,
+        enabled: false,
+    });
     wait(cancel, Duration::from_millis(800))?;
     let receivers = request.registry.snapshots();
     ensure!(!receivers.is_empty(), "No connected phones");
@@ -265,11 +276,9 @@ fn run(
     );
     if request.preview {
         controller.message("Reference test: adjust the phone to a comfortable loudness, then calibrate. Test stops after 5 seconds.");
-        request.registry.send(
-            reference.id,
-            ControlMessage::CalibrationTone { enabled: true },
-        )?;
+        switch_tone(&request.registry, reference.id, true, cancel)?;
         wait(cancel, Duration::from_secs(5))?;
+        switch_tone(&request.registry, reference.id, false, cancel)?;
         controller
             .message("Preview complete. Select Calibrate to use this loudness as the target.");
         return Ok(());
@@ -291,10 +300,17 @@ fn run(
         );
         originals.push((receiver.id, status));
     }
+    let mut begun = Vec::new();
     let result = (|| {
-        for (id, _) in &originals {
-            exchange_session(&request.registry, *id, CalibrationAction::Begin, cancel)?;
+        for (id, original) in &mut originals {
+            let actual = exchange_session(&request.registry, *id, CalibrationAction::Begin, cancel)?;
+            begun.push((*id, actual.clone()));
+            validate_device(&actual)?;
+            ensure!(actual.device_id == original.device_id && actual.minimum == original.minimum && actual.maximum == original.maximum, "Device changed before calibration started");
+            *original = actual;
         }
+        let reference_device = originals.iter().find(|(id, _)| *id == request.reference)
+            .map(|(_, device)| device.clone()).context("Reference phone disappeared")?;
         calibrate(
             controller,
             request,
@@ -363,7 +379,7 @@ fn run(
     match result {
         Ok(()) => Ok(()),
         Err(error) => {
-            let restore = restore(&request.registry, &originals);
+            let restore = restore(&request.registry, &begun);
             bail!("{error:#}. Original volumes restored where possible. {restore}");
         }
     }
@@ -378,10 +394,19 @@ fn calibrate(
     reference: &DeviceStatus,
 ) -> Result<(Vec<Setting>, String)> {
     let mut mic = Microphone::open()?;
-    controller.message("Measuring ambient noise with the Windows default microphone...");
-    let (background, _, background_tone) = mic.measure(cancel)?;
+    controller.message(if mic.raw {
+        "Measuring ambient noise with the Windows default microphone (RAW input)..."
+    } else {
+        "Measuring ambient noise with the Windows default microphone (processed input; disable enhancements)..."
+    });
+    let ambient = mic.measure(cancel)?;
+    let background = ambient.level_dbfs;
     ensure!(
-        !background_tone,
+        ambient.spread_db <= 3.0,
+        "Unstable ambient noise; keep the room quiet and disable microphone processing"
+    );
+    ensure!(
+        !ambient.tone_detected(),
         "Calibration tone detected before the test; stop other test playback and retry"
     );
     let target = measure(
@@ -390,7 +415,8 @@ fn calibrate(
         &mut mic,
         background,
         cancel,
-    )?;
+    )
+    .with_context(|| format!("Reference phone {}", reference.name))?;
     controller.message(format!(
         "Target {target:.1} dBFS (relative, not SPL). Matching phones..."
     ));
@@ -422,17 +448,21 @@ fn calibrate(
                     && actual.device_id == original.device_id,
                 "Device identity or volume range changed during calibration"
             );
-            let measurement = measure_raw(&request.registry, receiver.id, &mut mic, cancel)?;
-            let level = match signal_level(measurement.0, background) {
+            let measurement =
+                measure_raw(&request.registry, receiver.id, &mut mic, background, cancel)
+                    .with_context(|| format!("Measuring {}", original.name))?;
+            let level = match signal_level(measurement.signal.level_dbfs, measurement.background) {
                 Ok(level) => level,
                 Err(_) => continue,
             };
             ensure!(
-                measurement.2,
-                "Test signal not detected; silence other audio and check the phone speaker"
+                measurement.signal.tone_detected(),
+                "{}: test signal not detected ({}). Check the Windows default input and disable microphone noise suppression/enhancements",
+                original.name,
+                measurement.signal.diagnostics(measurement.background)
             );
             ensure!(
-                measurement.1 <= 3.0,
+                measurement.signal.spread_db <= 3.0,
                 "Unstable sound or microphone processing; disable AGC/enhancements and retry"
             );
             if let Some(previous) = previous {
@@ -501,13 +531,13 @@ fn calibrate(
         (repeated - target).abs() <= 2.0,
         "Reference drifted; keep microphone gain and position fixed and disable AGC"
     );
-    let (ending_noise, _, ending_tone) = mic.measure(cancel)?;
+    let ending_noise = mic.measure(cancel)?;
     ensure!(
-        !ending_tone,
+        !ending_noise.tone_detected(),
         "Test playback did not stop; calibration rejected"
     );
     ensure!(
-        ending_noise <= background + 3.0,
+        ending_noise.level_dbfs <= background + 3.0,
         "Ambient noise changed during calibration; retry in a quiet room"
     );
     Ok((
@@ -561,26 +591,85 @@ fn validate_device(device: &DeviceStatus) -> Result<()> {
     Ok(())
 }
 
+struct ToneMeasurement {
+    signal: Measurement,
+    background: f64,
+}
+
+fn switch_tone(
+    registry: &ReceiverRegistry,
+    id: u64,
+    enabled: bool,
+    cancel: &CancellationToken,
+) -> Result<u32> {
+    let request_id = registry.tone_request(id, enabled)?;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        ensure!(!cancel.is_cancelled(), "Calibration cancelled");
+        if let Some((playing, failed)) = registry.take_tone_reply(id, request_id) {
+            ensure!(
+                !failed && playing == enabled,
+                "Phone could not {} test playback",
+                if enabled { "start" } else { "stop" }
+            );
+            return Ok(request_id);
+        }
+        ensure!(
+            Instant::now() < deadline,
+            "Timed out waiting for the phone to {} test playback",
+            if enabled { "start" } else { "stop" }
+        );
+        ensure!(
+            registry.snapshots().iter().any(|r| r.id == id),
+            "Device disconnected"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
 fn measure_raw(
     registry: &ReceiverRegistry,
     id: u64,
     mic: &mut Microphone,
+    background: f64,
     cancel: &CancellationToken,
-) -> Result<(f64, f64, bool)> {
+) -> Result<ToneMeasurement> {
     let status = exchange(registry, id, None, cancel)?;
     validate_device(&status)?;
-    registry.send(id, ControlMessage::CalibrationTone { enabled: true })?;
+    let started = switch_tone(registry, id, true, cancel)?;
     let result = mic.measure(cancel);
-    let stopped = registry.send(id, ControlMessage::CalibrationTone { enabled: false });
-    let measurement = result?;
+    let interrupted = registry
+        .take_tone_reply(id, started)
+        .is_some_and(|(playing, failed)| !playing || failed);
+    let stopped = switch_tone(registry, id, false, &CancellationToken::new());
+    let signal = result?;
     stopped?;
+    ensure!(
+        !interrupted,
+        "Phone interrupted test playback during measurement"
+    );
     let after = exchange(registry, id, None, cancel)?;
     validate_device(&after)?;
     ensure!(
         after.volume == status.volume,
         "Device volume changed during measurement"
     );
-    Ok(measurement)
+    let ambient = mic.measure(cancel)?;
+    ensure!(
+        !ambient.tone_detected(),
+        "Test-like sound remains after playback stopped; silence other audio and retry"
+    );
+    ensure!(
+        ambient.spread_db <= 3.0 && (ambient.level_dbfs - background).abs() <= 3.0,
+        "Background changed during the test (initial {:.1} dBFS, current {:.1} dBFS, variation {:.1} dB); keep the room quiet and disable microphone processing",
+        background,
+        ambient.level_dbfs,
+        ambient.spread_db
+    );
+    Ok(ToneMeasurement {
+        signal,
+        background: ambient.level_dbfs,
+    })
 }
 
 fn measure(
@@ -590,16 +679,17 @@ fn measure(
     background: f64,
     cancel: &CancellationToken,
 ) -> Result<f64> {
-    let (level, spread, tone) = measure_raw(registry, id, mic, cancel)?;
+    let measurement = measure_raw(registry, id, mic, background, cancel)?;
     ensure!(
-        tone,
-        "Test signal not detected; silence other audio and check the phone speaker"
+        measurement.signal.tone_detected(),
+        "Test signal not detected ({}). Check the Windows default input and disable microphone noise suppression/enhancements",
+        measurement.signal.diagnostics(measurement.background)
     );
     ensure!(
-        spread <= 3.0,
+        measurement.signal.spread_db <= 3.0,
         "Unstable microphone measurement; disable AGC/enhancements and keep the room quiet"
     );
-    signal_level(level, background).map_err(anyhow::Error::msg)
+    signal_level(measurement.signal.level_dbfs, measurement.background).map_err(anyhow::Error::msg)
 }
 
 fn exchange(
@@ -664,16 +754,21 @@ fn wait(cancel: &CancellationToken, duration: Duration) -> Result<()> {
 }
 
 fn restore(registry: &ReceiverRegistry, originals: &[(u64, DeviceStatus)]) -> String {
-    registry.broadcast(ControlMessage::CalibrationTone { enabled: false });
+    registry.broadcast(ControlMessage::CalibrationTone {
+        request_id: 0,
+        enabled: false,
+    });
     let cancel = CancellationToken::new();
     let mut failures = Vec::new();
     for (id, status) in originals {
         let restored = (|| -> Result<()> {
-            let current = exchange(registry, *id, None, &cancel)?;
-            ensure!(current.speaker, "Output route changed");
-            let request = registry.restore_volume_request(*id, status.volume)?;
-            await_reply(registry, *id, request, &cancel)?;
-            exchange_session(registry, *id, CalibrationAction::Cancel, &cancel)?;
+            let stopped = switch_tone(registry, *id, false, &cancel);
+            let actual = exchange_session(registry, *id, CalibrationAction::Cancel, &cancel)?;
+            stopped?;
+            ensure!(
+                commit_confirmed(&actual, status, status.volume),
+                "Original volume could not be confirmed"
+            );
             Ok(())
         })();
         if restored.is_err() {

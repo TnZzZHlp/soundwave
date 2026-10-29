@@ -183,9 +183,9 @@ async fn connected_loop(
                         }
                         state.notify_changed();
                     }
-                    ControlMessage::CalibrationTone { enabled } => {
+                    ControlMessage::CalibrationTone { request_id, enabled } => {
                         ring.clear();
-                        state.device.set_tone(enabled);
+                        state.device.request_tone(request_id, enabled);
                         state.notify_changed();
                     }
                     ControlMessage::AdjustVolume { steps } => {
@@ -414,6 +414,27 @@ mod tests {
             assert!(
                 matches!(report, ControlMessage::DeviceStatus(status) if status.request_id == 56 && status.volume == 4)
             );
+            for (request_id, enabled) in [(57, true), (58, false)] {
+                writer
+                    .send(&ControlMessage::CalibrationTone {
+                        request_id,
+                        enabled,
+                    })
+                    .await
+                    .unwrap();
+                let report = tokio::time::timeout(Duration::from_secs(2), reader.receive())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    report,
+                    ControlMessage::ToneState {
+                        request_id,
+                        playing: enabled,
+                        failed: false
+                    }
+                );
+            }
 
             let sender = DatagramSender::new(connection.clone()).unwrap();
             let payload = vec![0_u8; 960];
@@ -476,6 +497,10 @@ mod tests {
                         failed: false,
                     });
                 }
+                let playback = state.device.playback_request();
+                state
+                    .device
+                    .report_playback(playback, state.device.tone_active());
                 if state.received_packets() >= 12
                     && ring.available_samples() >= PCM_RING_CAPACITY_SAMPLES
                     && volume_adjustment != 0

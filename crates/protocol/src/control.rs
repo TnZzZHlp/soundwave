@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ControlError;
 
-pub const PROTOCOL_VERSION: u16 = 7;
+pub const PROTOCOL_VERSION: u16 = 8;
 pub const SAMPLE_RATE: u32 = 48_000;
 pub const CHANNELS: u8 = 2;
 pub const CALIBRATION_FREQUENCIES: [f64; 6] = [317.0, 503.0, 797.0, 1259.0, 1999.0, 3163.0];
@@ -47,7 +47,13 @@ pub enum ControlMessage {
     },
     DeviceStatus(DeviceStatus),
     CalibrationTone {
+        request_id: u32,
         enabled: bool,
+    },
+    ToneState {
+        request_id: u32,
+        playing: bool,
+        failed: bool,
     },
     CalibrationSession {
         request_id: u32,
@@ -111,6 +117,15 @@ mod tests {
         );
         for message in [
             ControlMessage::AdjustVolume { steps: -1 },
+            ControlMessage::CalibrationTone {
+                request_id: 7,
+                enabled: true,
+            },
+            ControlMessage::ToneState {
+                request_id: 7,
+                playing: true,
+                failed: false,
+            },
             ControlMessage::SetVolume {
                 request_id: u32::MAX,
                 index: 15,

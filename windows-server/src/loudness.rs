@@ -55,7 +55,7 @@ impl LevelWindow {
             ) / (count * count)
         });
         powers.iter().sum::<f64>() >= total * 0.65
-            && powers.iter().filter(|&&p| p >= total * 0.01).count() >= 3
+            && powers.iter().filter(|&&p| p >= total * 0.001).count() >= 3
     }
 
     pub fn finish(&self) -> Result<f64, &'static str> {
@@ -127,7 +127,7 @@ mod tests {
     #[test]
     fn calibration_detection_rejects_unrelated_steady_sound() {
         let mut stimulus = LevelWindow::default();
-        let mut unrelated = LevelWindow::default();
+        let mut unrelated: [LevelWindow; 3] = std::array::from_fn(|_| LevelWindow::default());
         for frame in 0..4800 {
             let t = f64::from(frame) / 48_000.0;
             stimulus.push(
@@ -137,10 +137,29 @@ mod tests {
                     .sum::<f64>()
                     * 0.01,
             );
-            unrelated.push(0.1 * (std::f64::consts::TAU * 1000.0 * t).sin());
+            for (window, frequency) in unrelated.iter_mut().zip([317.0, 1000.0, 1999.0]) {
+                window.push(0.1 * (std::f64::consts::TAU * frequency * t).sin());
+            }
         }
         assert!(stimulus.tone_present());
-        assert!(!unrelated.tone_present());
+        assert!(unrelated.iter().all(|window| !window.tone_present()));
+    }
+
+    #[test]
+    fn calibration_detection_accepts_uneven_speaker_frequency_response() {
+        let gains = [0.005, 0.015, 0.05, 0.2, 1.0, 0.08];
+        let mut window = LevelWindow::default();
+        for frame in 0..4800 {
+            let t = f64::from(frame) / 48_000.0;
+            let sample = CALIBRATION_FREQUENCIES
+                .iter()
+                .zip(gains)
+                .map(|(frequency, gain)| gain * (std::f64::consts::TAU * frequency * t + 0.7).sin())
+                .sum::<f64>()
+                * 0.01;
+            window.push(sample);
+        }
+        assert!(window.tone_present());
     }
 
     #[test]

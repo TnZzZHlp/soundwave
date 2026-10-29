@@ -53,7 +53,13 @@ internal class DeviceVolumeControl(context: Context) {
     }
 
     private fun routeChanged() {
-        report(0, !cancelCalibration())
+        val failed = runCatching {
+            !speakerOnly() && !cancelCalibration()
+        }.getOrElse {
+            cancelCalibration()
+            true
+        }
+        report(0, failed)
     }
 
     fun applyPending() {
@@ -87,6 +93,7 @@ internal class DeviceVolumeControl(context: Context) {
                         }
                     }
                     4L -> failed = !cancelCalibration()
+                    8L -> failed = true
                     5L -> {
                         val expected = (command and 0xffff).toInt()
                         if (originalVolume == null || !speakerOnly() || manager.getStreamVolume(AudioManager.STREAM_MUSIC) != expected) {

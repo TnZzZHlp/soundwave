@@ -373,6 +373,7 @@ pub async fn process_control_messages(
                     break;
                 }
                 Ok(ControlMessage::DeviceStatus(status)) => registry.update_device(receiver_id, status),
+                Ok(ControlMessage::ToneState { request_id, playing, failed }) => registry.update_tone(receiver_id, request_id, playing, failed),
                 Ok(message) => debug!(?message, "ignoring unexpected client control message"),
                 Err(error) => {
                     debug!(%error, "control stream closed");

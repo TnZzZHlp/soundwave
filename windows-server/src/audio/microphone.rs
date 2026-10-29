@@ -10,13 +10,15 @@ use windows::Win32::{
         AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY, AUDCLNT_BUFFERFLAGS_SILENT,
         AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR, AUDCLNT_SHAREMODE_SHARED,
         AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM, AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
-        IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator, MMDeviceEnumerator, WAVEFORMATEX,
+        AUDCLNT_STREAMOPTIONS_RAW, AudioCategory_Other, AudioClientProperties, IAudioCaptureClient,
+        IAudioClient, IAudioClient2, IMMDeviceEnumerator, MMDeviceEnumerator, WAVEFORMATEX,
         eCapture, eConsole,
     },
     System::Com::{
         CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
     },
 };
+use windows::core::Interface;
 
 use crate::loudness::{LevelWindow, median_level};
 
@@ -27,9 +29,35 @@ impl Drop for Com {
     }
 }
 
+pub struct Measurement {
+    pub level_dbfs: f64,
+    pub spread_db: f64,
+    pub tone_windows: usize,
+    pub windows: usize,
+    pub raw: bool,
+}
+
+impl Measurement {
+    pub fn tone_detected(&self) -> bool {
+        self.windows != 0 && self.tone_windows * 4 >= self.windows * 3
+    }
+
+    pub fn diagnostics(&self, background: f64) -> String {
+        format!(
+            "input {:.1} dBFS, ambient {:.1} dBFS, test windows {}/{}, {} input",
+            self.level_dbfs,
+            background,
+            self.tone_windows,
+            self.windows,
+            if self.raw { "RAW" } else { "processed" }
+        )
+    }
+}
+
 pub struct Microphone {
     client: IAudioClient,
     capture: IAudioCaptureClient,
+    pub raw: bool,
     _com: Com,
 }
 
@@ -44,7 +72,16 @@ impl Microphone {
         let device = unsafe { enumerator.GetDefaultAudioEndpoint(eCapture, eConsole) }.context(
             "No default Windows microphone; check input device and microphone privacy settings",
         )?;
-        let client: IAudioClient = unsafe { device.Activate(CLSCTX_ALL, None) }?;
+        let mut client: IAudioClient = unsafe { device.Activate(CLSCTX_ALL, None) }?;
+        let properties = AudioClientProperties {
+            cbSize: std::mem::size_of::<AudioClientProperties>() as u32,
+            eCategory: AudioCategory_Other,
+            Options: AUDCLNT_STREAMOPTIONS_RAW,
+            ..Default::default()
+        };
+        let mut raw = client
+            .cast::<IAudioClient2>()
+            .is_ok_and(|client| unsafe { client.SetClientProperties(&properties).is_ok() });
         let format = WAVEFORMATEX {
             wFormatTag: 3,
             nChannels: 1,
@@ -54,7 +91,7 @@ impl Microphone {
             wBitsPerSample: 32,
             cbSize: 0,
         };
-        unsafe {
+        let initialize = |client: &IAudioClient| unsafe {
             client.Initialize(
                 AUDCLNT_SHAREMODE_SHARED,
                 AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
@@ -63,18 +100,32 @@ impl Microphone {
                 &format,
                 None,
             )
+        };
+        let mut initialized = initialize(&client);
+        if raw && initialized.is_err() {
+            client = unsafe { device.Activate(CLSCTX_ALL, None) }?;
+            raw = false;
+            initialized = initialize(&client);
         }
-        .context("Could not open microphone; check Windows microphone access for desktop apps")?;
+        initialized.context(
+            "Could not open microphone; check Windows microphone access for desktop apps",
+        )?;
         let capture = unsafe { client.GetService::<IAudioCaptureClient>() }?;
         unsafe { client.Start() }?;
         Ok(Self {
             client,
             capture,
+            raw,
             _com: com,
         })
     }
 
-    pub fn measure(&mut self, cancel: &CancellationToken) -> Result<(f64, f64, bool)> {
+    pub fn measure(&mut self, cancel: &CancellationToken) -> Result<Measurement> {
+        unsafe {
+            self.client.Stop()?;
+            self.client.Reset()?;
+            self.client.Start()?;
+        }
         let start = Instant::now();
         let settle = Duration::from_millis(800);
         let duration = Duration::from_millis(2000);
@@ -134,7 +185,13 @@ impl Microphone {
             thread::sleep(Duration::from_millis(5));
         }
         let (level, spread) = median_level(&mut levels).map_err(anyhow::Error::msg)?;
-        Ok((level, spread, tone_windows * 4 >= levels.len() * 3))
+        Ok(Measurement {
+            level_dbfs: level,
+            spread_db: spread,
+            tone_windows,
+            windows: levels.len(),
+            raw: self.raw,
+        })
     }
 }
 

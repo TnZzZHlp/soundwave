@@ -234,13 +234,17 @@ class AudioService : Service() {
     }
 
     private fun stopPlayback() {
-        if (!playbackRunning) return
+        if (!playbackRunning) {
+            NativeBridge.nativeReportPlayback(NativeBridge.nativeGetPlaybackRequest(), false)
+            return
+        }
         playbackRunning = false
         audioTrack?.let { track ->
             runCatching { track.pause() }
             runCatching { track.flush() }
         }
         audioThread?.interrupt()
+        NativeBridge.nativeReportPlayback(NativeBridge.nativeGetPlaybackRequest(), false)
     }
 
     @Suppress("DEPRECATION")
