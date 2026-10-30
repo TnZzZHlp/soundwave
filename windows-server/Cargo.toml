@@ -2,7 +2,7 @@
 name = "audio-stream-server"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
+rust-version = "1.89"
 license.workspace = true
 
 [dependencies]
@@ -20,6 +20,8 @@ tracing-subscriber.workspace = true
 thiserror.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+gpui.workspace = true
+raw-window-handle.workspace = true
 qrcodegen.workspace = true
-wasapi = "0.16.0"
+wasapi.workspace = true
 windows.workspace = true

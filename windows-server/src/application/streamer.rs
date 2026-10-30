@@ -1,3 +1,5 @@
+use std::sync::mpsc::SyncSender;
+
 use anyhow::Context;
 use quinn::{Endpoint, VarInt};
 use tokio_util::sync::CancellationToken;
@@ -7,25 +9,31 @@ use crate::{
     audio::{device::default_render_device_info, transmission::AudioTransmissionGate},
     config::{ServerArgs, default_identity_dir},
     pairing,
-    ui::{ServerUi, ServerUiInfo},
 };
 
-use super::{hub::CaptureHub, registry::ReceiverRegistry, session};
+use super::{
+    hub::CaptureHub,
+    registry::ReceiverRegistry,
+    session,
+    state::{ServerInfo, ServerState},
+};
 
-pub async fn run(args: ServerArgs) -> anyhow::Result<()> {
-    let device =
-        default_render_device_info().context("could not open the default Windows output device")?;
+pub async fn run(
+    args: ServerArgs,
+    shutdown: CancellationToken,
+    ready: SyncSender<Result<ServerState, String>>,
+) -> anyhow::Result<()> {
+    let device = default_render_device_info().context("无法打开 Windows 默认输出设备")?;
     let identity_dir = args
         .identity_dir
         .clone()
         .unwrap_or_else(default_identity_dir);
     let (server_config, identity) =
-        audio_stream_transport::load_or_create_server_config(&identity_dir)?;
+        audio_stream_transport::load_or_create_server_config(&identity_dir)
+            .context("无法加载或创建服务端证书和私钥")?;
     let endpoint = Endpoint::server(server_config, args.bind)
-        .with_context(|| format!("could not bind QUIC UDP socket at {}", args.bind))?;
-    let endpoint_address = endpoint
-        .local_addr()
-        .context("could not determine the QUIC listening address")?;
+        .with_context(|| format!("无法在 {} 绑定 QUIC UDP 套接字", args.bind))?;
+    let endpoint_address = endpoint.local_addr().context("无法确定 QUIC 监听地址")?;
     let fingerprint = audio_stream_transport::format_fingerprint(&identity.sha256_fingerprint);
     let pairing = pairing::resolve_pairing_info(
         args.bind,
@@ -47,7 +55,6 @@ pub async fn run(args: ServerArgs) -> anyhow::Result<()> {
         identity_dir.display(),
     );
 
-    let shutdown = CancellationToken::new();
     let transmission = AudioTransmissionGate::enabled();
     let hub = CaptureHub::new(transmission.clone());
     let registry = ReceiverRegistry::default();
@@ -58,29 +65,25 @@ pub async fn run(args: ServerArgs) -> anyhow::Result<()> {
         }
     });
 
-    let ui = match ServerUi::spawn(
-        ServerUiInfo {
-            device_name: device.friendly_name.clone(),
-            mix_sample_rate: device.mix_sample_rate,
-            mix_channels: device.mix_channels,
-            mix_bits_per_sample: device.mix_bits_per_sample,
-            mix_sample_type: device.mix_sample_type.clone(),
-            bind: endpoint_address,
-            fingerprint,
-            identity_dir: identity_dir.clone(),
-            pairing,
-        },
-        shutdown.clone(),
-        transmission.clone(),
-        registry.clone(),
-    ) {
-        Ok(ui) => Some(ui),
-        Err(error) => {
-            warn!(%error, "could not start the Windows taskbar UI");
-            None
-        }
-    };
-    let ui_reporter = ui.as_ref().map(ServerUi::reporter);
+    ready
+        .send(Ok(ServerState::new(
+            ServerInfo {
+                device_name: device.friendly_name.clone(),
+                mix_sample_rate: device.mix_sample_rate,
+                mix_channels: device.mix_channels,
+                mix_bits_per_sample: device.mix_bits_per_sample,
+                mix_sample_type: device.mix_sample_type.clone(),
+                bind: endpoint_address,
+                fingerprint,
+                identity_dir: identity_dir.clone(),
+                pairing,
+            },
+            shutdown.clone(),
+            transmission.clone(),
+            registry.clone(),
+        )))
+        .map_err(|_| anyhow::anyhow!("桌面界面在服务初始化前已退出"))?;
+    drop(ready);
 
     let mut sessions = tokio::task::JoinSet::new();
     loop {
@@ -95,7 +98,6 @@ pub async fn run(args: ServerArgs) -> anyhow::Result<()> {
         let hub = hub.clone();
         let registry = registry.clone();
         let server_shutdown = shutdown.clone();
-        let ui = ui_reporter.clone();
         let transmission = transmission.clone();
         // The handshake runs in the session task so a slow or stalled peer
         // cannot delay accepting the next receiver.
@@ -108,7 +110,7 @@ pub async fn run(args: ServerArgs) -> anyhow::Result<()> {
                 }
             };
             if let Err(error) =
-                session::run(connection, hub, registry, server_shutdown, ui, transmission).await
+                session::run(connection, hub, registry, server_shutdown, transmission).await
             {
                 warn!(%error, "receiver session ended with an error");
             }
@@ -123,9 +125,6 @@ pub async fn run(args: ServerArgs) -> anyhow::Result<()> {
     // sessions to unwind so capture is joined before the endpoint goes idle.
     sessions.shutdown().await;
 
-    if let Some(ui) = ui.as_ref() {
-        ui.shutdown();
-    }
     endpoint.close(VarInt::from_u32(0), b"server shutdown");
     endpoint.wait_idle().await;
     println!("Audio Stream Server stopped.");

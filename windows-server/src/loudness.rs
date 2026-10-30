@@ -60,10 +60,10 @@ impl LevelWindow {
 
     pub fn finish(&self) -> Result<f64, &'static str> {
         if self.count == 0 {
-            return Err("No microphone samples received");
+            return Err("未收到麦克风采样数据");
         }
         if self.clipped {
-            return Err("Microphone clipped; lower its gain or move it farther away");
+            return Err("麦克风发生削波，请降低增益或将其移远");
         }
         let mean = self.sum / f64::from(self.count);
         let power = mean
@@ -76,7 +76,7 @@ impl LevelWindow {
 #[cfg(windows)]
 pub fn median_level(levels: &mut [f64]) -> Result<(f64, f64), &'static str> {
     if levels.len() < 8 {
-        return Err("Insufficient microphone data");
+        return Err("麦克风数据不足");
     }
     levels.sort_by(f64::total_cmp);
     Ok((
@@ -87,7 +87,7 @@ pub fn median_level(levels: &mut [f64]) -> Result<(f64, f64), &'static str> {
 
 pub fn signal_level(measured: f64, background: f64) -> Result<f64, &'static str> {
     if measured - background < 10.0 {
-        return Err("Signal is too close to ambient noise");
+        return Err("信号与环境噪声过于接近");
     }
     Ok(10.0 * (10_f64.powf(measured / 10.0) - 10_f64.powf(background / 10.0)).log10())
 }

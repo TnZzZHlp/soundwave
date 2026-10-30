@@ -8,7 +8,6 @@ use tracing::{info, warn};
 use crate::{
     audio::transmission::AudioTransmissionGate,
     network::server::{self, StreamCounters},
-    ui::ServerUiReporter,
 };
 
 use super::{hub::CaptureHub, registry::ReceiverRegistry};
@@ -23,7 +22,6 @@ pub async fn run(
     hub: CaptureHub,
     registry: ReceiverRegistry,
     server_shutdown: CancellationToken,
-    ui: Option<ServerUiReporter>,
     transmission: AudioTransmissionGate,
 ) -> anyhow::Result<()> {
     let peer = connection.remote_address();
@@ -49,9 +47,6 @@ pub async fn run(
     );
 
     let guard = registry.register(peer, control_sender);
-    if let Some(ui) = ui.as_ref() {
-        ui.streaming_to(&registry.peers());
-    }
     println!("\nClient connected:\n{peer}\n\nStreaming...");
 
     server::process_control_messages(
@@ -77,13 +72,6 @@ pub async fn run(
     // Deregister before stopping capture so the UI never shows a receiver whose
     // session has already ended.
     drop(guard);
-    if let Some(ui) = ui.as_ref() {
-        if registry.len() == 0 {
-            ui.waiting_for_client();
-        } else {
-            ui.streaming_to(&registry.peers());
-        }
-    }
     hub.unsubscribe().await;
 
     info!(

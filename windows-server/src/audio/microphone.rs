@@ -44,12 +44,12 @@ impl Measurement {
 
     pub fn diagnostics(&self, background: f64) -> String {
         format!(
-            "input {:.1} dBFS, ambient {:.1} dBFS, test windows {}/{}, {} input",
+            "输入 {:.1} dBFS，环境 {:.1} dBFS，测试窗口 {}/{}，{}输入",
             self.level_dbfs,
             background,
             self.tone_windows,
             self.windows,
-            if self.raw { "RAW" } else { "processed" }
+            if self.raw { "原始" } else { "已处理" }
         )
     }
 }
@@ -65,13 +65,12 @@ impl Microphone {
     pub fn open() -> Result<Self> {
         unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }
             .ok()
-            .context("Could not initialize microphone capture")?;
+            .context("无法初始化麦克风采集")?;
         let com = Com;
         let enumerator: IMMDeviceEnumerator =
             unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }?;
-        let device = unsafe { enumerator.GetDefaultAudioEndpoint(eCapture, eConsole) }.context(
-            "No default Windows microphone; check input device and microphone privacy settings",
-        )?;
+        let device = unsafe { enumerator.GetDefaultAudioEndpoint(eCapture, eConsole) }
+            .context("未找到 Windows 默认麦克风，请检查输入设备和麦克风隐私设置")?;
         let mut client: IAudioClient = unsafe { device.Activate(CLSCTX_ALL, None) }?;
         let properties = AudioClientProperties {
             cbSize: std::mem::size_of::<AudioClientProperties>() as u32,
@@ -107,9 +106,7 @@ impl Microphone {
             raw = false;
             initialized = initialize(&client);
         }
-        initialized.context(
-            "Could not open microphone; check Windows microphone access for desktop apps",
-        )?;
+        initialized.context("无法打开麦克风，请检查 Windows 是否允许桌面应用访问麦克风")?;
         let capture = unsafe { client.GetService::<IAudioCaptureClient>() }?;
         unsafe { client.Start() }?;
         Ok(Self {
@@ -134,9 +131,9 @@ impl Microphone {
         let mut levels = Vec::with_capacity(12);
         let mut tone_windows = 0;
         while start.elapsed() < duration {
-            anyhow::ensure!(!cancel.is_cancelled(), "Calibration cancelled");
+            anyhow::ensure!(!cancel.is_cancelled(), "校准已取消");
             while unsafe { self.capture.GetNextPacketSize() }? > 0 {
-                anyhow::ensure!(!cancel.is_cancelled(), "Calibration cancelled");
+                anyhow::ensure!(!cancel.is_cancelled(), "校准已取消");
                 if start.elapsed() >= duration {
                     break;
                 }
@@ -155,7 +152,7 @@ impl Microphone {
                     Vec::new()
                 };
                 unsafe { self.capture.ReleaseBuffer(frames) }?;
-                anyhow::ensure!(!invalid, "Invalid microphone capture packet");
+                anyhow::ensure!(!invalid, "麦克风采集数据包无效");
                 if start.elapsed() < settle {
                     continue;
                 }
@@ -164,7 +161,7 @@ impl Microphone {
                         | AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR.0) as u32
                     != 0
                 {
-                    bail!("Microphone capture was interrupted; try again");
+                    bail!("麦克风采集已中断，请重试");
                 }
                 for index in 0..frames as usize {
                     let sample = if silent {

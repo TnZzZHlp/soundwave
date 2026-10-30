@@ -27,15 +27,15 @@ const SILENCE_FALLBACK_BLOCKS: usize = 5;
 
 #[derive(Debug, Error)]
 pub enum AudioError {
-    #[error("Windows COM initialization failed: {0}")]
+    #[error("Windows COM 初始化失败：{0}")]
     Com(String),
-    #[error("WASAPI error: {0}")]
+    #[error("WASAPI 错误：{0}")]
     Wasapi(#[from] WasapiError),
-    #[error("I/O error: {0}")]
+    #[error("输入输出错误：{0}")]
     Io(#[from] io::Error),
-    #[error("WASAPI returned an invalid {0}-byte f32 capture buffer")]
+    #[error("WASAPI 返回了无效的 {0} 字节 f32 采集缓冲区")]
     InvalidCaptureBytes(usize),
-    #[error("capture thread panicked")]
+    #[error("采集线程异常终止")]
     ThreadPanicked,
 }
 

@@ -3,18 +3,15 @@ use super::capture::AudioError;
 /// Converts interleaved little-endian f32 data supplied by the WASAPI shared
 /// converter to i16 PCM without allocating after the output buffer is warmed up.
 pub fn f32_le_to_i16(input: &[u8], output: &mut Vec<i16>) -> Result<(), AudioError> {
-    if input.len() % std::mem::size_of::<f32>() != 0 {
+    let (samples, remainder) = input.as_chunks::<4>();
+    if !remainder.is_empty() {
         return Err(AudioError::InvalidCaptureBytes(input.len()));
     }
 
     output.clear();
     output.reserve(input.len() / std::mem::size_of::<f32>());
-    for bytes in input.chunks_exact(std::mem::size_of::<f32>()) {
-        let sample = f32::from_le_bytes(
-            bytes
-                .try_into()
-                .map_err(|_| AudioError::InvalidCaptureBytes(input.len()))?,
-        );
+    for &bytes in samples {
+        let sample = f32::from_le_bytes(bytes);
         let sample = sample.clamp(-1.0, 1.0);
         #[allow(clippy::cast_possible_truncation)]
         output.push(if sample >= 0.0 {

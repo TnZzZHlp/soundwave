@@ -26,24 +26,20 @@ pub(crate) struct PairingInfo {
 
 #[derive(Debug, Error)]
 pub(crate) enum PairingError {
-    #[error("QR pairing supports IPv4 only; bind to an IPv4 address or pass --pairing-host <IPv4>")]
+    #[error("二维码配对仅支持 IPv4，请绑定 IPv4 地址或指定 --pairing-host <IPv4>")]
     Ipv6Bind,
-    #[error("{address} is not a usable LAN IPv4 address for QR pairing")]
+    #[error("{address} 不是可用于二维码配对的局域网 IPv4 地址")]
     UnusableAddress { address: Ipv4Addr },
-    #[error(
-        "--pairing-host {pairing_host} does not match the non-wildcard --bind address {bind_host}"
-    )]
+    #[error("--pairing-host {pairing_host} 与非通配的 --bind 地址 {bind_host} 不匹配")]
     IncompatibleBind {
         pairing_host: Ipv4Addr,
         bind_host: Ipv4Addr,
     },
-    #[error("could not enumerate Windows network adapters (Win32 error {status})")]
+    #[error("无法枚举 Windows 网卡（Win32 错误 {status}）")]
     AdapterEnumeration { status: u32 },
-    #[error("could not find a usable LAN IPv4 address; pass --pairing-host <IPv4>")]
+    #[error("未找到可用的局域网 IPv4 地址，请指定 --pairing-host <IPv4>")]
     NoCandidate,
-    #[error(
-        "multiple LAN IPv4 addresses are equally suitable ({addresses}); pass --pairing-host <IPv4>"
-    )]
+    #[error("存在多个同样适用的局域网 IPv4 地址（{addresses}），请指定 --pairing-host <IPv4>")]
     AmbiguousCandidates { addresses: String },
 }
 

@@ -126,7 +126,7 @@ impl CalibrationController {
                 .unwrap_or_else(|e| e.into_inner())
                 .settings
                 .is_empty(),
-            "No saved calibration; preview a reference and calibrate first"
+            "尚未保存校准，请先试听基准手机并完成校准"
         );
         self.apply_group(registry, 100)
     }
@@ -137,11 +137,8 @@ impl CalibrationController {
         percent: u16,
     ) -> Result<Vec<(u64, u32)>> {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        ensure!(!state.running, "Calibration is running");
-        ensure!(
-            !state.settings.is_empty(),
-            "Calibrate phones before using group volume"
-        );
+        ensure!(!state.running, "正在校准");
+        ensure!(!state.settings.is_empty(), "使用群组音量前，请先校准手机");
         let mut errors = Vec::new();
         let mut requests = Vec::new();
         for receiver in registry.snapshots() {
@@ -150,7 +147,7 @@ impl CalibrationController {
             };
             if device.fixed || device.failed {
                 errors.push(format!(
-                    "{}: system volume is unavailable or the last request failed; skipped",
+                    "{}：系统音量不可用或上次请求失败，已跳过",
                     device.name
                 ));
                 continue;
@@ -161,10 +158,7 @@ impl CalibrationController {
                     && s.maximum == device.maximum
             });
             if !state.settings.is_empty() && (calibrated.is_none() || !device.speaker) {
-                errors.push(format!(
-                    "{}: no matching speaker calibration; skipped",
-                    device.name
-                ));
+                errors.push(format!("{}：没有匹配的扬声器校准记录，已跳过", device.name));
                 continue;
             }
             let base = calibrated.map_or(device.maximum, |s| s.index);
@@ -184,17 +178,17 @@ impl CalibrationController {
 
     pub fn start(&self, request: CalibrationRequest) -> Result<()> {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        ensure!(!state.running, "Calibration is already running");
+        ensure!(!state.running, "校准已在进行中");
         ensure!(
             (1..=100).contains(&request.ceiling_percent),
-            "Invalid calibration ceiling"
+            "校准音量上限无效"
         );
         let cancel = request.shutdown.child_token();
         state.running = true;
         state.preview = request.preview;
         state.committing = false;
         state.cancel = cancel.clone();
-        state.message = "Preparing test playback...".into();
+        state.message = "正在准备试听…".into();
         let controller = self.clone();
         let spawned = thread::Builder::new()
             .name("soundwave-calibration".into())
@@ -263,31 +257,27 @@ fn run(
     });
     wait(cancel, Duration::from_millis(800))?;
     let receivers = request.registry.snapshots();
-    ensure!(!receivers.is_empty(), "No connected phones");
+    ensure!(!receivers.is_empty(), "没有已连接的手机");
     let reference = receivers
         .iter()
         .find(|r| r.id == request.reference)
-        .context("Reference phone disconnected")?;
+        .context("基准手机已断开连接")?;
     let reference_device = exchange(&request.registry, reference.id, None, cancel)?;
     validate_device(&reference_device)?;
     ensure!(
         reference_device.volume > reference_device.minimum,
-        "Raise the reference phone above mute before previewing"
+        "请先调高基准手机音量，取消静音后再试听"
     );
     if request.preview {
-        controller.message("Reference test: adjust the phone to a comfortable loudness, then calibrate. Test stops after 5 seconds.");
+        controller.message("基准试听：请将手机调至舒适音量，然后开始校准。试听将在 5 秒后停止。");
         switch_tone(&request.registry, reference.id, true, cancel)?;
         wait(cancel, Duration::from_secs(5))?;
         switch_tone(&request.registry, reference.id, false, cancel)?;
-        controller
-            .message("Preview complete. Select Calibrate to use this loudness as the target.");
+        controller.message("试听结束。点击“校准”，以当前响度为目标。");
         return Ok(());
     }
 
-    ensure!(
-        receivers.len() >= 2,
-        "Connect at least two phones to match loudness"
-    );
+    ensure!(receivers.len() >= 2, "请至少连接两台手机以匹配响度");
     let mut originals = Vec::new();
     for receiver in &receivers {
         let status = exchange(&request.registry, receiver.id, None, cancel)?;
@@ -296,7 +286,7 @@ fn run(
             !originals
                 .iter()
                 .any(|(_, d): &(u64, DeviceStatus)| d.device_id == status.device_id),
-            "Duplicate device identity; reconnect the phones"
+            "设备标识重复，请重新连接手机"
         );
         originals.push((receiver.id, status));
     }
@@ -306,11 +296,11 @@ fn run(
             let actual = exchange_session(&request.registry, *id, CalibrationAction::Begin, cancel)?;
             begun.push((*id, actual.clone()));
             validate_device(&actual)?;
-            ensure!(actual.device_id == original.device_id && actual.minimum == original.minimum && actual.maximum == original.maximum, "Device changed before calibration started");
+            ensure!(actual.device_id == original.device_id && actual.minimum == original.minimum && actual.maximum == original.maximum, "校准开始前设备已发生变化");
             *original = actual;
         }
         let reference_device = originals.iter().find(|(id, _)| *id == request.reference)
-            .map(|(_, device)| device.clone()).context("Reference phone disappeared")?;
+            .map(|(_, device)| device.clone()).context("基准手机已断开连接")?;
         calibrate(
             controller,
             request,
@@ -321,22 +311,22 @@ fn run(
         )
     })()
     .and_then(|(settings, summary)| {
-        ensure!(!cancel.is_cancelled(), "Calibration cancelled");
+        ensure!(!cancel.is_cancelled(), "校准已取消");
         for (id, _) in &originals {
             let actual = exchange(&request.registry, *id, None, cancel)?;
             validate_device(&actual)?;
             if let Some(setting) = settings.iter().find(|s| s.device_id == actual.device_id) {
                 ensure!(
                     actual.volume == setting.index,
-                    "A device volume changed before calibration completed"
+                    "校准完成前，有设备的音量发生了变化"
                 );
             }
         }
         {
             let mut state = controller.state.lock().unwrap_or_else(|e| e.into_inner());
-            ensure!(!cancel.is_cancelled(), "Calibration cancelled");
+            ensure!(!cancel.is_cancelled(), "校准已取消");
             state.committing = true;
-            state.message = "Saving calibrated settings, then applying them to each phone...".into();
+            state.message = "正在保存校准设置，随后将应用到各台手机…".into();
         }
         let text = settings
             .iter()
@@ -347,7 +337,7 @@ fn run(
         }
         let temporary = request.profile_path.with_extension("tmp");
         {
-            let mut file = fs::File::create(&temporary).context("Could not save calibration")?;
+            let mut file = fs::File::create(&temporary).context("无法保存校准设置")?;
             file.write_all(text.as_bytes())?;
             file.sync_all()?;
         }
@@ -359,7 +349,7 @@ fn run(
                     | windows::Win32::Storage::FileSystem::MOVEFILE_WRITE_THROUGH,
             )
         }
-        .context("Could not save calibration")?;
+        .context("无法保存校准设置")?;
         let mut unconfirmed = Vec::new();
         let finish = CancellationToken::new();
         for (id, original) in &originals {
@@ -372,7 +362,7 @@ fn run(
         if unconfirmed.is_empty() {
             controller.message(summary);
         } else {
-            controller.message(format!("Calibrated settings saved. Apply could not be confirmed for: {}. Check their volumes or use Apply saved calibration after reconnecting.\r\n{summary}", unconfirmed.join(", ")));
+            controller.message(format!("校准设置已保存，但以下设备未确认应用结果：{}。请检查音量，或重新连接后点击“应用已保存的校准”。\r\n{summary}", unconfirmed.join(", ")));
         }
         Ok(())
     });
@@ -380,7 +370,7 @@ fn run(
         Ok(()) => Ok(()),
         Err(error) => {
             let restore = restore(&request.registry, &begun);
-            bail!("{error:#}. Original volumes restored where possible. {restore}");
+            bail!("{error:#}。已尽可能恢复原始音量。{restore}");
         }
     }
 }
@@ -395,19 +385,19 @@ fn calibrate(
 ) -> Result<(Vec<Setting>, String)> {
     let mut mic = Microphone::open()?;
     controller.message(if mic.raw {
-        "Measuring ambient noise with the Windows default microphone (RAW input)..."
+        "正在使用 Windows 默认麦克风测量环境噪声（原始输入）…"
     } else {
-        "Measuring ambient noise with the Windows default microphone (processed input; disable enhancements)..."
+        "正在使用 Windows 默认麦克风测量环境噪声（已处理的输入，请关闭音效增强）…"
     });
     let ambient = mic.measure(cancel)?;
     let background = ambient.level_dbfs;
     ensure!(
         ambient.spread_db <= 3.0,
-        "Unstable ambient noise; keep the room quiet and disable microphone processing"
+        "环境噪声不稳定，请保持室内安静，并关闭麦克风音频处理"
     );
     ensure!(
         !ambient.tone_detected(),
-        "Calibration tone detected before the test; stop other test playback and retry"
+        "测试开始前检测到校准音，请停止其他测试音频后重试"
     );
     let target = measure(
         &request.registry,
@@ -416,9 +406,9 @@ fn calibrate(
         background,
         cancel,
     )
-    .with_context(|| format!("Reference phone {}", reference.name))?;
+    .with_context(|| format!("基准手机 {}", reference.name))?;
     controller.message(format!(
-        "Target {target:.1} dBFS (relative, not SPL). Matching phones..."
+        "目标响度为 {target:.1} dBFS（相对值，非声压级），正在匹配手机…"
     ));
     let mut settings = vec![setting(reference)];
     let mut results = Vec::new();
@@ -426,7 +416,7 @@ fn calibrate(
         let original = originals
             .iter()
             .find(|(id, _)| *id == receiver.id)
-            .context("Device disappeared")?
+            .context("设备已断开连接")?
             .1
             .clone();
         let ceiling = original.minimum
@@ -437,7 +427,7 @@ fn calibrate(
         let mut best: Option<(u16, f64)> = None;
         for index in (original.minimum.saturating_add(1)..=ceiling).take(64) {
             controller.message(format!(
-                "Matching {}: step {index}/{ceiling}; target {target:.1} dBFS",
+                "正在匹配 {}：音量档位 {index}/{ceiling}，目标 {target:.1} dBFS",
                 original.name
             ));
             let actual = exchange(&request.registry, receiver.id, Some(index), cancel)?;
@@ -446,29 +436,29 @@ fn calibrate(
                 actual.maximum == original.maximum
                     && actual.minimum == original.minimum
                     && actual.device_id == original.device_id,
-                "Device identity or volume range changed during calibration"
+                "校准过程中，设备标识或音量范围发生了变化"
             );
             let measurement =
                 measure_raw(&request.registry, receiver.id, &mut mic, background, cancel)
-                    .with_context(|| format!("Measuring {}", original.name))?;
+                    .with_context(|| format!("正在测量 {}", original.name))?;
             let level = match signal_level(measurement.signal.level_dbfs, measurement.background) {
                 Ok(level) => level,
                 Err(_) => continue,
             };
             ensure!(
                 measurement.signal.tone_detected(),
-                "{}: test signal not detected ({}). Check the Windows default input and disable microphone noise suppression/enhancements",
+                "{}：未检测到测试信号（{}）。请检查 Windows 默认输入设备，并关闭麦克风降噪和音效增强",
                 original.name,
                 measurement.signal.diagnostics(measurement.background)
             );
             ensure!(
                 measurement.signal.spread_db <= 3.0,
-                "Unstable sound or microphone processing; disable AGC/enhancements and retry"
+                "声音不稳定或受麦克风音频处理影响，请关闭自动增益和音效增强后重试"
             );
             if let Some(previous) = previous {
                 ensure!(
                     level >= previous.1 - 2.0,
-                    "Volume measurements are not monotonic; check microphone processing and room noise"
+                    "音量测量结果未随档位递增，请检查麦克风音频处理和室内噪声"
                 );
             }
             let candidate = (index, level);
@@ -486,7 +476,7 @@ fn calibrate(
                 cancel,
             )?;
             results.push(format!(
-                "{}: target unreachable within the ceiling; original volume restored",
+                "{}：在音量上限内无法达到目标响度，已恢复原始音量",
                 original.name
             ));
             continue;
@@ -496,7 +486,7 @@ fn calibrate(
         if (verified - target).abs() <= 2.0 {
             settings.push(setting(&actual));
             results.push(format!(
-                "{}: matched at {index}/{} ({:+.1} dB)",
+                "{}：已在音量档位 {index}/{} 匹配（{:+.1} dB）",
                 original.name,
                 original.maximum,
                 verified - target
@@ -509,7 +499,7 @@ fn calibrate(
                 cancel,
             )?;
             results.push(format!(
-                "{}: target unreachable/coarse volume steps ({:+.1} dB); original volume restored",
+                "{}：无法达到目标响度或音量档位过粗（{:+.1} dB），已恢复原始音量",
                 original.name,
                 verified - target
             ));
@@ -518,7 +508,7 @@ fn calibrate(
     let reference_now = exchange(&request.registry, request.reference, None, cancel)?;
     ensure!(
         reference_now.volume == reference.volume,
-        "Reference volume changed during calibration"
+        "校准过程中基准手机音量发生了变化"
     );
     let repeated = measure(
         &request.registry,
@@ -529,21 +519,21 @@ fn calibrate(
     )?;
     ensure!(
         (repeated - target).abs() <= 2.0,
-        "Reference drifted; keep microphone gain and position fixed and disable AGC"
+        "基准响度发生漂移，请固定麦克风增益和位置，并关闭自动增益"
     );
     let ending_noise = mic.measure(cancel)?;
     ensure!(
         !ending_noise.tone_detected(),
-        "Test playback did not stop; calibration rejected"
+        "测试播放未停止，校准结果已拒绝"
     );
     ensure!(
         ending_noise.level_dbfs <= background + 3.0,
-        "Ambient noise changed during calibration; retry in a quiet room"
+        "校准过程中环境噪声发生变化，请在安静环境中重试"
     );
     Ok((
         settings,
         format!(
-            "Calibration complete (relative, within 2 dB at this position).\r\n{}",
+            "校准完成（相对响度，在当前聆听位置的误差不超过 2 dB）。\r\n{}",
             results.join("\r\n")
         ),
     ))
@@ -571,23 +561,20 @@ fn setting(device: &DeviceStatus) -> Setting {
 fn validate_device(device: &DeviceStatus) -> Result<()> {
     ensure!(
         device.maximum > device.minimum,
-        "{} has no adjustable volume range",
+        "{} 没有可调整的音量范围",
         device.name
     );
     ensure!(
         !device.failed && !device.fixed,
-        "{} cannot change system media volume",
+        "{} 无法调整系统媒体音量",
         device.name
     );
     ensure!(
         device.speaker,
-        "{}: disconnect headphones, Bluetooth and external outputs before calibration",
+        "{}：校准前请断开耳机、蓝牙和外接音频输出设备",
         device.name
     );
-    ensure!(
-        !device.device_id.is_empty(),
-        "Device has no stable identity"
-    );
+    ensure!(!device.device_id.is_empty(), "设备没有稳定的标识");
     Ok(())
 }
 
@@ -605,23 +592,23 @@ fn switch_tone(
     let request_id = registry.tone_request(id, enabled)?;
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
-        ensure!(!cancel.is_cancelled(), "Calibration cancelled");
+        ensure!(!cancel.is_cancelled(), "校准已取消");
         if let Some((playing, failed)) = registry.take_tone_reply(id, request_id) {
             ensure!(
                 !failed && playing == enabled,
-                "Phone could not {} test playback",
-                if enabled { "start" } else { "stop" }
+                "手机无法{}测试播放",
+                if enabled { "开始" } else { "停止" }
             );
             return Ok(request_id);
         }
         ensure!(
             Instant::now() < deadline,
-            "Timed out waiting for the phone to {} test playback",
-            if enabled { "start" } else { "stop" }
+            "等待手机{}测试播放超时",
+            if enabled { "开始" } else { "停止" }
         );
         ensure!(
             registry.snapshots().iter().any(|r| r.id == id),
-            "Device disconnected"
+            "设备已断开连接"
         );
         thread::sleep(Duration::from_millis(20));
     }
@@ -644,24 +631,21 @@ fn measure_raw(
     let stopped = switch_tone(registry, id, false, &CancellationToken::new());
     let signal = result?;
     stopped?;
-    ensure!(
-        !interrupted,
-        "Phone interrupted test playback during measurement"
-    );
+    ensure!(!interrupted, "测量过程中手机中断了测试播放");
     let after = exchange(registry, id, None, cancel)?;
     validate_device(&after)?;
     ensure!(
         after.volume == status.volume,
-        "Device volume changed during measurement"
+        "测量过程中设备音量发生了变化"
     );
     let ambient = mic.measure(cancel)?;
     ensure!(
         !ambient.tone_detected(),
-        "Test-like sound remains after playback stopped; silence other audio and retry"
+        "播放停止后仍检测到类似测试音的声音，请停止其他音频后重试"
     );
     ensure!(
         ambient.spread_db <= 3.0 && (ambient.level_dbfs - background).abs() <= 3.0,
-        "Background changed during the test (initial {:.1} dBFS, current {:.1} dBFS, variation {:.1} dB); keep the room quiet and disable microphone processing",
+        "测试过程中背景噪声发生变化（初始 {:.1} dBFS，当前 {:.1} dBFS，波动 {:.1} dB），请保持室内安静并关闭麦克风音频处理",
         background,
         ambient.level_dbfs,
         ambient.spread_db
@@ -682,12 +666,12 @@ fn measure(
     let measurement = measure_raw(registry, id, mic, background, cancel)?;
     ensure!(
         measurement.signal.tone_detected(),
-        "Test signal not detected ({}). Check the Windows default input and disable microphone noise suppression/enhancements",
+        "未检测到测试信号（{}）。请检查 Windows 默认输入设备，并关闭麦克风降噪和音效增强",
         measurement.signal.diagnostics(measurement.background)
     );
     ensure!(
         measurement.signal.spread_db <= 3.0,
-        "Unstable microphone measurement; disable AGC/enhancements and keep the room quiet"
+        "麦克风测量不稳定，请关闭自动增益和音效增强，并保持室内安静"
     );
     signal_level(measurement.signal.level_dbfs, measurement.background).map_err(anyhow::Error::msg)
 }
@@ -723,22 +707,19 @@ fn await_reply(
 ) -> Result<DeviceStatus> {
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
-        ensure!(!cancel.is_cancelled(), "Calibration cancelled");
+        ensure!(!cancel.is_cancelled(), "校准已取消");
         if let Some(status) = registry.take_reply(id, request_id) {
             ensure!(
                 !status.failed,
-                "{} rejected the volume request (system policy or safe-volume limit)",
+                "{} 拒绝了音量调整请求（系统策略或安全音量限制）",
                 status.name
             );
             return Ok(status);
         }
-        ensure!(
-            Instant::now() < deadline,
-            "Timed out waiting for device acknowledgement"
-        );
+        ensure!(Instant::now() < deadline, "等待设备确认超时");
         ensure!(
             registry.snapshots().iter().any(|r| r.id == id),
-            "Device disconnected"
+            "设备已断开连接"
         );
         thread::sleep(Duration::from_millis(20));
     }
@@ -747,7 +728,7 @@ fn await_reply(
 fn wait(cancel: &CancellationToken, duration: Duration) -> Result<()> {
     let end = Instant::now() + duration;
     while Instant::now() < end {
-        ensure!(!cancel.is_cancelled(), "Calibration cancelled");
+        ensure!(!cancel.is_cancelled(), "校准已取消");
         thread::sleep(Duration::from_millis(20));
     }
     Ok(())
@@ -767,13 +748,13 @@ fn restore(registry: &ReceiverRegistry, originals: &[(u64, DeviceStatus)]) -> St
             stopped?;
             ensure!(
                 commit_confirmed(&actual, status, status.volume),
-                "Original volume could not be confirmed"
+                "无法确认原始音量是否已恢复"
             );
             Ok(())
         })();
         if restored.is_err() {
             failures.push(format!(
-                "Restore {} manually to {}/{}",
+                "请手动将 {} 的音量恢复至 {}/{}",
                 status.name, status.volume, status.maximum
             ));
         }
@@ -828,6 +809,6 @@ mod tests {
             },
         );
         assert!(controller.apply_group(&registry, 100).unwrap().is_empty());
-        assert!(controller.status().1.contains("skipped"));
+        assert!(controller.status().1.contains("已跳过"));
     }
 }

@@ -139,10 +139,10 @@ impl ReceiverRegistry {
             .receivers
             .get(&id)
             .map(|r| r.controls.clone())
-            .ok_or_else(|| anyhow::anyhow!("device disconnected"))?;
+            .ok_or_else(|| anyhow::anyhow!("设备已断开连接"))?;
         controls
             .try_send(message)
-            .map_err(|e| anyhow::anyhow!("could not queue device command: {e}"))
+            .map_err(|e| anyhow::anyhow!("无法发送设备控制命令：{e}"))
     }
 
     pub fn request(&self, id: u64, index: Option<u16>) -> anyhow::Result<u32> {
@@ -261,28 +261,14 @@ impl ReceiverRegistry {
         if let Some(receiver) = state.receivers.get_mut(&id) {
             receiver.device = Some(status.clone());
             if status.request_id != 0 {
-                if receiver.replies.len() >= 32 {
-                    if let Some(oldest) = receiver.replies.keys().next().copied() {
-                        receiver.replies.remove(&oldest);
-                    }
+                if receiver.replies.len() >= 32
+                    && let Some(oldest) = receiver.replies.keys().next().copied()
+                {
+                    receiver.replies.remove(&oldest);
                 }
                 receiver.replies.insert(status.request_id, status);
             }
         }
-    }
-
-    /// Returns the connected receiver addresses in connect order.
-    pub fn peers(&self) -> Vec<SocketAddr> {
-        self.lock()
-            .receivers
-            .values()
-            .map(|receiver| receiver.peer)
-            .collect()
-    }
-
-    /// Returns how many receivers are currently connected.
-    pub fn len(&self) -> usize {
-        self.lock().receivers.len()
     }
 
     fn remove(&self, id: u64) {
