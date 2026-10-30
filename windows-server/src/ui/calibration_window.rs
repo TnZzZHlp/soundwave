@@ -86,25 +86,31 @@ impl Dashboard {
         }
         let owner = cx.entity();
         let bounds = Bounds::centered(None, size(px(1000.), px(800.)), cx);
-        let result = cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_min_size: Some(size(px(780.), px(560.))),
-                titlebar: Some(TitlebarOptions {
-                    title: Some("主从音量校准".into()),
+        cx.defer(move |cx| {
+            let window_owner = owner.clone();
+            let result = cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    window_min_size: Some(size(px(780.), px(560.))),
+                    titlebar: Some(TitlebarOptions {
+                        title: Some("主从音量校准".into()),
+                        ..Default::default()
+                    }),
                     ..Default::default()
-                }),
-                ..Default::default()
-            },
-            move |window, cx| cx.new(|cx| CalibrationWindow::new(owner, window, cx)),
-        );
-        match result {
-            Ok(handle) => self.calibration_window = Some(handle),
-            Err(error) => {
-                self.controller.command(Command::CloseCalibration);
-                self.controller.notice = format!("无法打开校准窗口：{error}");
-            }
-        }
+                },
+                move |window, cx| cx.new(|cx| CalibrationWindow::new(window_owner, window, cx)),
+            );
+            owner.update(cx, |parent, cx| {
+                match result {
+                    Ok(handle) => parent.calibration_window = Some(handle),
+                    Err(error) => {
+                        parent.controller.command(Command::CloseCalibration);
+                        parent.controller.notice = format!("无法打开校准窗口：{error}");
+                    }
+                }
+                cx.notify();
+            });
+        });
         cx.notify();
     }
 
