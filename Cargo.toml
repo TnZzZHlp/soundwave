@@ -1,11 +1,6 @@
 [workspace]
 resolver = "2"
-members = [
-    "crates/protocol",
-    "crates/transport",
-    "windows-server",
-    "android/app/src/main/rust",
-]
+members = ["crates/protocol", "crates/transport", "windows-server", "android/app/src/main/rust"]
 
 [workspace.package]
 version = "0.2.3"
@@ -24,7 +19,10 @@ crossbeam-queue = "0.3.12"
 gpui = { version = "=0.2.2", default-features = false, features = ["windows-manifest"] }
 jni = "0.22.4"
 postcard = { version = "1.1.1", features = ["alloc"] }
-quinn = { version = "0.11.6", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+quinn = { version = "0.11.6", default-features = false, features = [
+  "runtime-tokio",
+  "rustls-ring",
+] }
 qrcodegen = "1.8.0"
 raw-window-handle = "0.6.2"
 rcgen = "0.13.2"
@@ -32,23 +30,51 @@ rustls = { version = "0.23.26", default-features = false, features = ["ring", "s
 serde = { version = "1.0.219", features = ["derive"] }
 sha2 = "0.10.9"
 thiserror = "2.0.12"
-tokio = { version = "1.44.1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "1.44.1", features = [
+  "io-util",
+  "macros",
+  "net",
+  "rt-multi-thread",
+  "signal",
+  "sync",
+  "time",
+] }
 tokio-util = { version = "0.7.15", features = ["rt"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 wasapi = "0.16.0"
 windows = { version = "0.59.0", features = [
-    "Win32_Foundation",
-    "Win32_Graphics_Gdi",
-    "Win32_Media_Audio",
-    "Win32_System_Com",
-    "Win32_Storage_FileSystem",
-    "Win32_NetworkManagement_IpHelper",
-    "Win32_NetworkManagement_Ndis",
-    "Win32_Networking_WinSock",
-    "Win32_System_LibraryLoader",
-    "Win32_UI_Shell",
-    "Win32_UI_Controls",
-    "Win32_UI_Input_KeyboardAndMouse",
-    "Win32_UI_WindowsAndMessaging",
+  "Win32_Foundation",
+  "Win32_Graphics_Gdi",
+  "Win32_Media_Audio",
+  "Win32_System_Com",
+  "Win32_Storage_FileSystem",
+  "Win32_NetworkManagement_IpHelper",
+  "Win32_NetworkManagement_Ndis",
+  "Win32_Networking_WinSock",
+  "Win32_System_LibraryLoader",
+  "Win32_UI_Shell",
+  "Win32_UI_Controls",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_WindowsAndMessaging",
 ] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+style = { level = "deny", priority = -1 }
+complexity = { level = "deny", priority = -1 }
+perf = { level = "deny", priority = -1 }
+suspicious = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+cargo = { level = "deny", priority = -1 }
+all = { level = "warn", priority = -1 }
+
+cargo_common_metadata = "allow"
+multiple_crate_versions = "allow"
+missing_errors_doc = "allow"
+similar_names = "allow"
+must_use_candidate = "allow"
+too_many_lines = "allow"
