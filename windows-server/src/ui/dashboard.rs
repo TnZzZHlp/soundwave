@@ -52,7 +52,9 @@ impl Colors {
 }
 
 pub(super) struct Dashboard {
-    controller: Controller,
+    pub(super) controller: Controller,
+    pub(super) calibration_window:
+        Option<WindowHandle<super::calibration_window::CalibrationWindow>>,
     matrix: Result<QrCode, String>,
     pub colors: Colors,
     pub dragging: Option<SliderKind>,
@@ -107,6 +109,7 @@ impl Dashboard {
         });
         Self {
             controller: Controller::new(model),
+            calibration_window: None,
             matrix,
             colors: Colors::for_window(window),
             dragging: None,
@@ -130,6 +133,19 @@ impl Dashboard {
                     cx.write_to_clipboard(ClipboardItem::new_string(pairing.uri.clone()));
                 }
             }
+            Command::OpenCalibration => {
+                self.open_calibration(cx);
+                return;
+            }
+            Command::CloseCalibration => {
+                self.controller.command(command);
+                if !self.controller.view().editing {
+                    self.calibration_window = None;
+                    window.remove_window();
+                }
+                cx.notify();
+                return;
+            }
             Command::Calibrate if !native::confirm_calibration(window) => return,
             Command::Show(_) => self.dragging = None,
             _ => {}
@@ -138,7 +154,7 @@ impl Dashboard {
         cx.notify();
     }
 
-    fn panel(&self) -> Div {
+    pub(super) fn panel(&self) -> Div {
         div()
             .flex()
             .flex_col()
@@ -180,172 +196,135 @@ impl Dashboard {
 
     fn receivers(&self, cx: &Context<Self>) -> Div {
         let c = &self.controller;
-        let (busy, calibration_status) = c.server.calibration.status();
-        let can_adjust = c.server.calibration.can_adjust();
-        let mut list = div()
-            .id("receiver-list")
-            .max_h(px(180.))
-            .overflow_y_scroll()
-            .flex()
-            .flex_col()
-            .gap_2();
-        for receiver in &c.receivers {
-            let label = match &receiver.device {
-                Some(device) => format!(
-                    "{}  |  {}  |  {}/{}{}{}",
-                    device.name,
-                    receiver.peer,
-                    device.volume,
-                    device.maximum,
-                    if device.fixed {
-                        "（固定音量）"
-                    } else {
-                        ""
-                    },
-                    if device.failed {
-                        "（请求被拒绝）"
-                    } else {
-                        ""
-                    }
-                ),
-                None => format!("{}  |  等待设备状态", receiver.peer),
-            };
-            list = list.child(
+        let view = c.view();
+        let profile = view.library.current();
+        let devices = c
+            .receivers
+            .iter()
+            .filter_map(|r| r.device.as_ref())
+            .collect::<Vec<_>>();
+        let available = profile.map_or_else(Vec::new, |p| p.available(&p.participating(&devices)));
+        let busy = view.editing || c.server.calibration.status().0;
+        let mut panel = self
+            .panel()
+            .flex_1()
+            .min_w_0()
+            .child(div().text_lg().child("主从设备"))
+            .child(self.button(
+                "open-calibration",
+                "校准与配置",
+                true,
+                Command::OpenCalibration,
+                cx,
+            ));
+        let mut profiles = div().flex().flex_wrap().gap_2();
+        for saved in &view.library.profiles {
+            profiles = profiles.child(
                 self.button(
-                    ("receiver", receiver.id),
-                    label,
+                    ("profile", saved.id),
+                    saved.name.clone(),
                     !busy,
-                    Command::Select(receiver.id),
+                    Command::Profile(saved.id),
                     cx,
                 )
-                .when(c.selected == Some(receiver.id), |el| {
+                .when(view.library.active == Some(saved.id), |el| {
                     el.border_color(self.colors.accent)
                 }),
             );
         }
-        if c.receivers.is_empty() {
-            list = list.child(
-                div()
-                    .py_3()
-                    .text_color(self.colors.muted)
-                    .child("等待 Android 设备连接"),
-            );
+        panel = panel.child(profiles);
+        if profile.is_none() {
+            panel = panel.child("请打开校准窗口，指定主设备并保存音量对应关系。");
         }
-        let device = c.selected_device();
-        let volume = c.volume().unwrap_or(0);
-        let (minimum, maximum) = device.map_or((0, 1), |d| (d.minimum, d.maximum));
-        let label = device.map_or_else(
-            || "请选择已连接的手机".to_owned(),
-            |d| {
-                format!(
-                    "{}: {}% ({}/{})",
-                    d.name,
-                    u32::from(volume.saturating_sub(d.minimum)) * 100
-                        / u32::from((d.maximum - d.minimum).max(1)),
-                    volume,
-                    d.maximum
-                )
-            },
-        );
-        let ready = !busy && device.is_some_and(|d| !d.fixed && d.speaker);
-        let calibrated = !busy && !c.receivers.is_empty() && c.server.calibration.has_settings();
-        let message = if busy || c.notice.is_empty() {
-            calibration_status
-        } else {
-            c.notice.clone()
-        };
-        self.panel()
-            .flex_1()
-            .min_w_0()
-            .child(
-                div()
-                    .text_lg()
-                    .child(format!("接收设备（{}）", c.receivers.len())),
-            )
-            .child(list)
-            .child(div().text_sm().child(label))
-            .child(self.slider(
-                "device-volume",
-                SliderKind::Volume,
-                volume,
-                (minimum, maximum),
-                can_adjust && device.is_some_and(|d| !d.fixed),
-                cx,
-            ))
-            .child(
-                div()
-                    .flex()
-                    .gap_2()
-                    .child(self.button(
-                        "volume-down",
-                        "全部调低",
-                        can_adjust && !c.receivers.is_empty(),
-                        Command::AdjustAll(-1),
-                        cx,
-                    ))
-                    .child(self.button(
-                        "volume-up",
-                        "全部调高",
-                        can_adjust && !c.receivers.is_empty(),
-                        Command::AdjustAll(1),
-                        cx,
-                    )),
-            )
-            .child(
-                div()
-                    .text_sm()
-                    .child(format!("群组音量：已保存校准值的 {}%", c.group)),
-            )
-            .child(self.slider(
-                "group-volume",
-                SliderKind::Group,
-                c.group,
-                (0, 100),
-                calibrated,
-                cx,
-            ))
-            .child(self.button(
-                "apply-saved",
-                "应用已保存的校准",
-                calibrated,
-                Command::Apply,
-                cx,
-            ))
-            .child(
-                div()
-                    .text_sm()
-                    .child(format!("校准音量上限：{}%", c.ceiling)),
-            )
-            .child(self.slider(
-                "calibration-ceiling",
-                SliderKind::Ceiling,
-                c.ceiling,
-                (1, 100),
-                !busy,
-                cx,
-            ))
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_2()
-                    .child(self.button("preview", "试听 5 秒", ready, Command::Preview, cx))
-                    .child(self.button(
-                        "calibrate",
-                        "校准",
-                        ready && c.receivers.len() >= 2,
-                        Command::Calibrate,
-                        cx,
-                    ))
-                    .child(self.button(
-                        "cancel",
-                        "取消",
-                        busy && c.server.calibration.can_cancel(),
-                        Command::Cancel,
-                        cx,
-                    )),
-            )
-            .child(div().text_sm().text_color(self.colors.muted).child(message))
+        for receiver in &c.receivers {
+            let Some(device) = &receiver.device else {
+                panel = panel.child(format!("{}：等待设备状态", receiver.peer));
+                continue;
+            };
+            let master = profile.is_some_and(|p| p.master.id == device.device_id);
+            let master_ready = profile.is_some_and(|p| p.master.matches(device));
+            let follower =
+                profile.and_then(|p| p.followers.iter().find(|f| f.device.id == device.device_id));
+            let role = if master {
+                "主设备"
+            } else if follower.is_some_and(|f| !f.mapping.is_empty() && f.device.matches(device)) {
+                "从设备"
+            } else if follower.is_some() {
+                "从设备，未校准或当前不可用"
+            } else {
+                "未校准，不参与播放"
+            };
+            let value = if master {
+                profile.map_or(device.volume, |p| p.volume)
+            } else {
+                device.volume
+            };
+            let row = div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(format!(
+                    "{} · {} · 实际 {}/{}",
+                    device.name, role, device.volume, device.maximum
+                ))
+                .child(self.slider(
+                    ("device-volume", receiver.id),
+                    if master {
+                        SliderKind::MasterPosition
+                    } else {
+                        SliderKind::Device(receiver.id)
+                    },
+                    if master {
+                        available
+                            .iter()
+                            .position(|index| *index == value)
+                            .unwrap_or(0) as u16
+                    } else {
+                        value
+                    },
+                    if master {
+                        (0, available.len().saturating_sub(1) as u16)
+                    } else {
+                        (device.minimum, device.maximum)
+                    },
+                    master_ready && !busy && !available.is_empty(),
+                    cx,
+                ));
+            panel = panel.child(row);
+        }
+        if c.receivers.is_empty() {
+            panel = panel.child("等待 Android 设备连接");
+        }
+        if let Some(profile) = profile {
+            if !c
+                .receivers
+                .iter()
+                .any(|r| r.device.as_ref().is_some_and(|d| profile.master.matches(d)))
+            {
+                panel = panel.child(format!("主设备 {} 未就绪，整组暂停", profile.master.name));
+            }
+            let available = available
+                .iter()
+                .map(u16::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            panel = panel.child(div().text_color(self.colors.muted).child(
+                if available.is_empty() {
+                    "无共同校准档位，整组暂停".to_owned()
+                } else {
+                    format!("主设备可用档位：{available}")
+                },
+            ));
+        }
+        panel.child(
+            div()
+                .text_color(self.colors.muted)
+                .child(if view.message.is_empty() {
+                    c.notice.clone()
+                } else {
+                    view.message
+                }),
+        )
     }
 
     fn information(&self, cx: &Context<Self>) -> Div {
@@ -416,7 +395,10 @@ impl Render for Dashboard {
         } else if c.receivers.is_empty() {
             "等待连接".into()
         } else {
-            format!("正在向 {} 台设备传输", c.receivers.len())
+            format!(
+                "正在向 {} 台设备传输",
+                c.receivers.iter().filter(|r| r.playing).count()
+            )
         };
         let content = match c.page {
             Page::Receivers => self.receivers(cx),

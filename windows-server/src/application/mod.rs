@@ -5,3 +5,4 @@ pub mod registry;
 pub mod session;
 pub mod state;
 pub mod streamer;
+pub mod volume_control;

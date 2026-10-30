@@ -17,12 +17,18 @@ internal class DeviceVolumeControl(context: Context) {
     private val handler = Handler(Looper.getMainLooper())
     private var originalVolume: Int? = null
     private var deadline = 0L
+    private var reportedVolume = -1
     private val watchdog = object : Runnable {
         override fun run() {
             if (originalVolume != null && (SystemClock.elapsedRealtime() >= deadline || NativeBridge.nativeGetState() != NativeBridge.STATE_CONNECTED)) {
                 report(0, !cancelCalibration())
             }
-            handler.postDelayed(this, 500)
+            if (NativeBridge.nativeGetState() == NativeBridge.STATE_CONNECTED &&
+                runCatching { manager.getStreamVolume(AudioManager.STREAM_MUSIC) != reportedVolume }.getOrDefault(false)
+            ) {
+                report(0, false)
+            }
+            handler.postDelayed(this, 200)
         }
     }
     private val routeCallback = object : AudioDeviceCallback() {
@@ -69,8 +75,11 @@ internal class DeviceVolumeControl(context: Context) {
             val requestId = command ushr 24
             val operation = (command ushr 16) and 0xff
             var failed = false
+            var restoredExpiredCalibration = false
+            var commandVolume: Int? = null
             try {
                 if (originalVolume != null && SystemClock.elapsedRealtime() >= deadline) {
+                    restoredExpiredCalibration = true
                     failed = !cancelCalibration()
                 }
                 when (operation) {
@@ -81,7 +90,9 @@ internal class DeviceVolumeControl(context: Context) {
                         } else {
                             val index = (command and 0xffff).toInt().coerceIn(minimum(), manager.getStreamMaxVolume(AudioManager.STREAM_MUSIC))
                             manager.setStreamVolume(AudioManager.STREAM_MUSIC, index, 0)
-                            failed = manager.getStreamVolume(AudioManager.STREAM_MUSIC) != index
+                            val actual = manager.getStreamVolume(AudioManager.STREAM_MUSIC)
+                            commandVolume = actual
+                            failed = actual != index
                         }
                     }
                     3L -> {
@@ -106,7 +117,7 @@ internal class DeviceVolumeControl(context: Context) {
             } catch (_: RuntimeException) {
                 failed = true
             }
-            report(requestId, failed)
+            report(requestId, failed, operation == 1L && !restoredExpiredCalibration, commandVolume)
         }
     }
 
@@ -116,14 +127,19 @@ internal class DeviceVolumeControl(context: Context) {
         manager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).map { it.type }.toIntArray(),
     )
 
-    private fun report(requestId: Long, failed: Boolean) {
+    private fun report(requestId: Long, failed: Boolean, observeExternalChange: Boolean = false, commandVolume: Int? = null) {
         try {
-            var values = manager.getStreamVolume(AudioManager.STREAM_MUSIC).toLong()
+            val volume = commandVolume ?: manager.getStreamVolume(AudioManager.STREAM_MUSIC)
+            var values = volume.toLong()
             values = values or (minimum().toLong() shl 16)
             values = values or (manager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).toLong() shl 32)
             if (manager.isVolumeFixed) values = values or (1L shl 48)
             if (speakerOnly()) values = values or (1L shl 49)
             if (failed) values = values or (1L shl 50)
+            if (observeExternalChange && !failed && requestId != 0L && reportedVolume >= 0 && volume != reportedVolume) {
+                NativeBridge.nativeReportDevice(0, deviceId, name, values)
+            }
+            if (!failed || commandVolume != null) reportedVolume = volume
             NativeBridge.nativeReportDevice(requestId, deviceId, name, values)
         } catch (_: RuntimeException) {
             NativeBridge.nativeReportDevice(requestId, deviceId, name, (1L shl 48) or (1L shl 50))

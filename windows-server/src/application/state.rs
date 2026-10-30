@@ -2,7 +2,10 @@ use std::{net::SocketAddr, path::PathBuf};
 
 use tokio_util::sync::CancellationToken;
 
-use super::{calibration::CalibrationController, registry::ReceiverRegistry};
+use super::{
+    calibration::CalibrationController, registry::ReceiverRegistry,
+    volume_control::VolumeController,
+};
 use crate::{audio::transmission::AudioTransmissionGate, pairing::PairingInfo};
 
 pub(crate) struct ServerInfo {
@@ -23,6 +26,7 @@ pub(crate) struct ServerState {
     pub transmission: AudioTransmissionGate,
     pub registry: ReceiverRegistry,
     pub calibration: CalibrationController,
+    pub volume: VolumeController,
 }
 
 impl ServerState {
@@ -32,14 +36,20 @@ impl ServerState {
         transmission: AudioTransmissionGate,
         registry: ReceiverRegistry,
     ) -> Self {
-        let calibration =
-            CalibrationController::load(&info.identity_dir.join("volume-calibration.txt"));
+        let calibration = CalibrationController::default();
+        let volume = VolumeController::new(
+            info.identity_dir.join("volume-profiles.bin"),
+            registry.clone(),
+            transmission.clone(),
+            shutdown.clone(),
+        );
         Self {
             info,
             shutdown,
             transmission,
             registry,
             calibration,
+            volume,
         }
     }
 }

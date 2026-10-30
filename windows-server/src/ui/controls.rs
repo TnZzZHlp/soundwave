@@ -6,17 +6,17 @@ use super::{dashboard::Dashboard, model::Command};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum SliderKind {
-    Volume,
-    Group,
-    Ceiling,
+    Device(u64),
+    MasterPosition,
+    MasterPoint,
 }
 
 impl SliderKind {
     fn command(self, value: u16) -> Command {
         match self {
-            Self::Volume => Command::Volume(value),
-            Self::Group => Command::Group(value),
-            Self::Ceiling => Command::Ceiling(value),
+            Self::Device(id) => Command::DeviceVolume(id, value),
+            Self::MasterPosition => Command::MasterPosition(value),
+            Self::MasterPoint => Command::MasterPoint(value),
         }
     }
 }
@@ -30,8 +30,25 @@ impl Dashboard {
         command: Command,
         cx: &Context<Self>,
     ) -> Stateful<Div> {
+        self.action_button(
+            id,
+            label,
+            enabled,
+            move |this, window, cx| this.dispatch(command.clone(), window, cx),
+            cx,
+        )
+    }
+
+    pub(super) fn action_button(
+        &self,
+        id: impl Into<ElementId>,
+        label: impl Into<SharedString>,
+        enabled: bool,
+        action: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + Clone + 'static,
+        cx: &Context<Self>,
+    ) -> Stateful<Div> {
         let colors = self.colors;
-        let keyboard_command = command.clone();
+        let keyboard_action = action.clone();
         div()
             .id(id)
             .px_3()
@@ -49,12 +66,12 @@ impl Dashboard {
                     .hover(|el| el.bg(colors.hover))
                     .focus(|el| el.border_color(colors.accent))
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        this.dispatch(command.clone(), window, cx);
+                        action(this, window, cx);
                     }))
                     .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
                         if matches!(event.keystroke.key.as_str(), "enter" | "space") {
                             cx.stop_propagation();
-                            this.dispatch(keyboard_command.clone(), window, cx);
+                            keyboard_action(this, window, cx);
                         }
                     }))
             })
@@ -62,7 +79,7 @@ impl Dashboard {
 
     pub(super) fn slider(
         &self,
-        id: &'static str,
+        id: impl Into<ElementId>,
         kind: SliderKind,
         value: u16,
         range: (u16, u16),
@@ -70,6 +87,7 @@ impl Dashboard {
         cx: &Context<Self>,
     ) -> Stateful<Div> {
         let (minimum, maximum) = range;
+        let value = value.clamp(minimum, maximum);
         let fraction =
             f32::from(value.saturating_sub(minimum)) / f32::from((maximum - minimum).max(1));
         let bounds = Rc::new(Cell::new(Bounds::<Pixels>::default()));

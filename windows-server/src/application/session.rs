@@ -36,6 +36,8 @@ pub async fn run(
     // One outbound control queue per receiver carries both its own AudioIdle
     // notices and the server-wide volume adjustments.
     let (control_sender, control_receiver) = tokio::sync::mpsc::channel(16);
+    let guard = registry.register(peer, control_sender.clone());
+    let playback = registry.playback_gate(guard.id());
     let network = server::spawn_datagram_sender(
         connection.clone(),
         blocks,
@@ -43,10 +45,11 @@ pub async fn run(
         session_stop.clone(),
         counters.clone(),
         transmission,
-        control_sender.clone(),
+        server::ReceiverOutput {
+            controls: control_sender,
+            playback,
+        },
     );
-
-    let guard = registry.register(peer, control_sender);
     println!("\nClient connected:\n{peer}\n\nStreaming...");
 
     server::process_control_messages(

@@ -1,6 +1,6 @@
 use std::sync::{
     Arc,
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 use anyhow::Context;
@@ -82,6 +82,11 @@ pub async fn perform_handshake(
     Ok((writer, reader, frame_duration_ms))
 }
 
+pub struct ReceiverOutput {
+    pub controls: tokio::sync::mpsc::Sender<ControlMessage>,
+    pub playback: Arc<AtomicBool>,
+}
+
 /// Sends shared capture blocks to one receiver.
 ///
 /// Every receiver runs its own sender task with its own packetizer, sequence
@@ -95,8 +100,12 @@ pub fn spawn_datagram_sender(
     stop: CancellationToken,
     counters: Arc<StreamCounters>,
     transmission: AudioTransmissionGate,
-    outbound: tokio::sync::mpsc::Sender<ControlMessage>,
+    output: ReceiverOutput,
 ) -> tokio::task::JoinHandle<Result<(), TransportError>> {
+    let ReceiverOutput {
+        controls: outbound,
+        playback,
+    } = output;
     tokio::runtime::Handle::current().spawn(async move {
         let sender = match DatagramSender::new(connection) {
             Ok(sender) => sender,
@@ -128,10 +137,11 @@ pub fn spawn_datagram_sender(
 
             match tokio::time::timeout(poll, frames.recv()).await {
                 Ok(Ok(block)) => {
+                    let allowed = playback.load(Ordering::Acquire);
                     let (send, became_idle) = silence.update(
                         block.timestamp,
                         block.samples.iter().all(|&sample| sample == 0),
-                        transmission.is_enabled(),
+                        transmission.is_enabled() && allowed,
                     );
                     if became_idle {
                         packetizer.pending_tail = None;
@@ -359,7 +369,9 @@ pub async fn process_control_messages(
             _ = stop.cancelled() => break,
             _ = connection.closed() => break,
             _ = query_tick.tick() => {
-                if writer.send(&ControlMessage::QueryDevice { request_id: 0 }).await.is_err() { break; }
+                if let Err(error) = registry.request(receiver_id, None) {
+                    warn!(%error, "failed to queue device status query");
+                }
             }
             Some(message) = outbound.recv() => {
                 if let Err(error) = writer.send(&message).await {

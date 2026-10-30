@@ -15,6 +15,9 @@ mod network;
 mod pairing;
 #[cfg(windows)]
 mod ui;
+#[cfg(any(windows, test))]
+#[cfg_attr(not(windows), allow(dead_code))]
+mod volume_profiles;
 
 #[cfg(windows)]
 fn main() {

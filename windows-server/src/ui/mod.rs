@@ -1,6 +1,8 @@
+mod calibration_window;
 mod controls;
 mod dashboard;
 mod model;
+mod name_input;
 mod native;
 mod qr;
 mod tray;
@@ -12,6 +14,8 @@ use gpui::{prelude::*, *};
 pub(crate) use native::{show_capture_complete, show_startup_error};
 
 pub(crate) fn run(model: crate::application::state::ServerState) -> anyhow::Result<()> {
+    let shutdown = model.shutdown.clone();
+    let volume = model.volume.clone();
     let (sender, receiver) = mpsc::sync_channel(16);
     let tray = tray::Tray::new(sender, model.transmission.clone())?;
     let failure = Rc::new(RefCell::new(None));
@@ -43,6 +47,8 @@ pub(crate) fn run(model: crate::application::state::ServerState) -> anyhow::Resu
             }
         }
     });
+    shutdown.cancel();
+    let volume_result = volume.finish();
     let error = failure.borrow_mut().take();
-    error.map_or(Ok(()), Err)
+    error.map_or(Ok(()), Err).and(volume_result)
 }
