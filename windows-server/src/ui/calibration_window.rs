@@ -189,6 +189,19 @@ impl Dashboard {
                     cx,
                 ));
             if let Some(follower) = follower {
+                row = row.child(self.button(
+                    ("preview-pair", receiver.id),
+                    "主从同时试听 5 秒",
+                    ready
+                        && follower.device.matches(device)
+                        && draft.is_some_and(|p| {
+                            c.receivers
+                                .iter()
+                                .any(|r| r.device.as_ref().is_some_and(|d| p.master.matches(d)))
+                        }),
+                    Command::PreviewPair(receiver.id),
+                    cx,
+                ));
                 let point = follower
                     .mapping
                     .get(&c.point)

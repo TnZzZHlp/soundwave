@@ -30,6 +30,7 @@ pub(super) enum Command {
     Record(u64),
     RemovePoint(u64),
     PreviewDevice(u64),
+    PreviewPair(u64),
     StopTone,
     Calibrate,
     Cancel,
@@ -360,18 +361,46 @@ impl Controller {
                     Ok(())
                 })?;
             }
-            Command::PreviewDevice(id) => {
-                ensure!(
-                    self.view().editing && self.settled(),
-                    "请等待音量确认后试听"
-                );
+            Command::PreviewDevice(id) | Command::PreviewPair(id) => {
+                let view = self.view();
+                ensure!(view.editing && self.settled(), "请等待音量确认后试听");
+                let mut targets = vec![id];
+                if matches!(command, Command::PreviewPair(_)) {
+                    let profile = view.draft.context("请先指定主设备")?;
+                    let follower = self
+                        .receivers
+                        .iter()
+                        .find(|r| r.id == id)
+                        .and_then(|r| r.device.as_ref())
+                        .context("从设备未连接")?;
+                    ensure!(
+                        profile.followers.iter().any(|f| f.device.matches(follower)),
+                        "从设备当前不可用"
+                    );
+                    let master = self
+                        .receivers
+                        .iter()
+                        .find(|r| r.device.as_ref().is_some_and(|d| profile.master.matches(d)))
+                        .context("主设备未连接或当前不可用")?;
+                    targets.push(master.id);
+                }
                 self.server.registry.broadcast(
                     audio_stream_protocol::ControlMessage::CalibrationTone {
                         request_id: 0,
                         enabled: false,
                     },
                 );
-                self.server.registry.tone_request(id, true)?;
+                for target in targets {
+                    if let Err(error) = self.server.registry.tone_request(target, true) {
+                        self.server.registry.broadcast(
+                            audio_stream_protocol::ControlMessage::CalibrationTone {
+                                request_id: 0,
+                                enabled: false,
+                            },
+                        );
+                        return Err(error);
+                    }
+                }
             }
             Command::StopTone => self.server.registry.broadcast(
                 audio_stream_protocol::ControlMessage::CalibrationTone {
