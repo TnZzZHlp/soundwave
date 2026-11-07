@@ -24,34 +24,50 @@ env:
 
 jobs:
   windows-server:
-    name: Windows server (cross-compiled)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    name: Windows server (native)
+    runs-on: windows-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install MinGW-w64 linker
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends gcc-mingw-w64-x86-64
-
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-pc-windows-gnu
 
       - uses: Swatinem/rust-cache@v2
         with:
           key: windows-server
 
+      # gpui compiles its HLSL shaders with fxc.exe, which the Windows SDK
+      # ships but does not put on PATH. gpui falls back to one hard-coded SDK
+      # version, so point it at whatever version this image provides.
+      - name: Locate the HLSL compiler
+        shell: pwsh
+        run: |
+          $found = Get-ChildItem -Path "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\fxc.exe" `
+            -ErrorAction SilentlyContinue
+          $fxc = $found |
+            Where-Object { $_.Directory.Parent.Name -match '^\d+(\.\d+)+$' } |
+            Sort-Object { [version]$_.Directory.Parent.Name } |
+            Select-Object -Last 1
+          if (-not $fxc) { throw 'fxc.exe was not found in the Windows SDK' }
+          Write-Host "Using $($fxc.FullName)"
+          Add-Content -Path $env:GITHUB_ENV -Value "GPUI_FXC_PATH=$($fxc.FullName)"
+
+      # The static CRT comes from .cargo/config.toml; keep it target-scoped so
+      # build scripts are not affected.
       - name: Build release server
-        run: cargo build --release --target x86_64-pc-windows-gnu -p audio-stream-server
+        run: cargo build --release --target x86_64-pc-windows-msvc -p audio-stream-server
 
       - name: Package server
+        shell: pwsh
         run: |
-          mkdir -p dist
-          cp target/x86_64-pc-windows-gnu/release/audio-stream-server.exe dist/
-          cd dist
-          sha256sum audio-stream-server.exe > SHA256SUMS-windows.txt
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $exe = "target\x86_64-pc-windows-msvc\release\audio-stream-server.exe"
+          Copy-Item $exe dist\
+          $hash = (Get-FileHash "dist\audio-stream-server.exe" -Algorithm SHA256).Hash.ToLower()
+          [IO.File]::WriteAllText(
+            "$PWD\dist\SHA256SUMS-windows.txt",
+            "$hash  audio-stream-server.exe`n"
+          )
 
       - uses: actions/upload-artifact@v4
         with:

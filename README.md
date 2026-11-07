@@ -117,7 +117,7 @@ From the repository root:
 cargo build --release -p audio-stream-server
 ```
 
-The executable is `target\release\audio-stream-server.exe`. On Unix hosts, `just build-server` cross-compiles `target/x86_64-pc-windows-gnu/release/audio-stream-server.exe`; it requires the `x86_64-pc-windows-gnu` Rust target and MinGW-w64 linker.
+The executable is `target\release\audio-stream-server.exe`. Build it on Windows: the release profile links a static CRT and GPUI compiles its HLSL shaders with `fxc.exe` from the Windows SDK, so a Unix host cannot produce a working release build. On Unix, `just build-server` runs a `x86_64-pc-windows-gnu` compile check instead; it requires the `x86_64-pc-windows-gnu` Rust target and MinGW-w64 linker, and `just` on Unix cannot produce the exe.
 
 Useful development checks:
 
@@ -206,7 +206,7 @@ The UI shows a conservative estimated latency, current buffer duration, and pack
 Pushing a `v*` tag, or running the **release** workflow manually with a tag, builds and publishes both artifacts:
 
 - `soundwave-<version>.apk`, signed with the release keystore, for `arm64-v8a` and `x86_64`
-- `audio-stream-server.exe`, cross-compiled for Windows with `x86_64-pc-windows-gnu`
+- `audio-stream-server.exe`, built natively for Windows with the MSVC toolchain and a static CRT
 
 Both jobs also upload `SHA256SUMS-*.txt`, and the workflow verifies the APK signature with `apksigner` before publishing. `versionName` comes from the tag without its leading `v`; `versionCode` is the commit count of the tagged revision.
 

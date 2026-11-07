@@ -1,0 +1,6 @@
+# Keep the published Windows server self-contained: link the CRT statically so
+# the executable does not require a Visual C++ redistributable on the target
+# machine. Target-scoped flags apply only to the final binary, never to build
+# scripts or proc macros running on the host.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

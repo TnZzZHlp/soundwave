@@ -16,9 +16,12 @@ build-workspace:
 build-server:
     cargo build --release -p audio-stream-server
 
+# The release exe must be built on Windows: gpui compiles HLSL shaders with
+# fxc.exe from the Windows SDK, which the Unix release profile cannot provide.
+# This recipe is a compile check only and does not produce an executable.
 [unix]
 build-server:
-    cargo build --release --target x86_64-pc-windows-gnu -p audio-stream-server
+    cargo check --release --target x86_64-pc-windows-gnu -p audio-stream-server
 
 # Build the signed Android release APK and its native Rust libraries.
 [windows]
