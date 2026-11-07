@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, MutexGuard},
     thread,
     time::{Duration, Instant},
 };
@@ -10,7 +10,7 @@ use anyhow::{Context, Result, ensure};
 use audio_stream_protocol::{ControlMessage, DeviceStatus};
 use tokio_util::sync::CancellationToken;
 
-use super::registry::ReceiverRegistry;
+use super::registry::{ReceiverRegistry, ReceiverSnapshot};
 use crate::{
     audio::transmission::AudioTransmissionGate,
     volume_profiles::{DeviceRange, Follower, Library, Profile},
@@ -163,7 +163,7 @@ impl VolumeController {
         }
     }
 
-    pub fn open(&self, registry: &ReceiverRegistry, gate: &AudioTransmissionGate) -> Result<()> {
+    pub fn open(&self, registry: &ReceiverRegistry) -> Result<()> {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         ensure!(!state.editing, "校准窗口已打开");
         ensure!(state.pending.is_empty(), "请等待音量指令确认后打开校准窗口");
@@ -175,12 +175,13 @@ impl VolumeController {
             .filter_map(|r| r.device.map(|d| (r.id, d)))
             .collect();
         state.blocked.clear();
-        registry.deny_all();
-        gate.set_calibrating(true);
+        // Opening the editor only stages a draft: PCM keeps flowing so neither
+        // a lone phone nor an already playing group is silenced while the
+        // operator selects a device. Measurement pauses transmission itself.
         Ok(())
     }
 
-    pub fn close(&self, registry: &ReceiverRegistry, gate: &AudioTransmissionGate) {
+    pub fn close(&self, registry: &ReceiverRegistry) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         registry.broadcast(ControlMessage::CalibrationTone {
             request_id: 0,
@@ -210,7 +211,6 @@ impl VolumeController {
         state.draft = None;
         state.master_seen = None;
         state.blocked.clear();
-        gate.set_calibrating(false);
     }
 
     pub fn set_master(&self, master: &DeviceStatus, registry: &ReceiverRegistry) -> Result<()> {
@@ -381,6 +381,28 @@ impl VolumeController {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         ensure!(!state.editing, "校准窗口打开时不能改变正式音量");
         let snapshots = registry.snapshots();
+        if snapshots.len() == 1 {
+            let receiver = &snapshots[0];
+            let device = receiver.device.as_ref().context("设备尚未就绪")?;
+            ensure!(!device.fixed && !device.failed, "设备无法调整扬声器音量");
+            let index = requested.clamp(device.minimum, device.maximum);
+            // Direct mode has no calibration session, so it uses the ordinary
+            // user volume command and works on any output route, not only the
+            // built-in speaker.
+            let request = registry.request(receiver.id, Some(index))?;
+            state.pending.insert(
+                receiver.id,
+                Pending {
+                    request,
+                    index,
+                    at: Instant::now(),
+                },
+            );
+            state.blocked.clear();
+            state.message.clear();
+            registry.deny_all();
+            return Ok(());
+        }
         let active = state.library.active;
         let profile = state
             .library
@@ -428,13 +450,16 @@ impl VolumeController {
         Ok(())
     }
 
-    fn tick(&self, registry: &ReceiverRegistry) {
+    pub fn tick(&self, registry: &ReceiverRegistry) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if state.editing {
-            registry.deny_all();
+        let snapshots = registry.snapshots();
+        if snapshots.len() == 1 {
+            self.tick_single(&mut state, registry, &snapshots[0]);
             return;
         }
-        let snapshots = registry.snapshots();
+        if state.editing {
+            return;
+        }
         let ids: BTreeSet<_> = snapshots.iter().map(|r| r.id).collect();
         state.blocked.retain(|id| ids.contains(id));
         let mut failures = Vec::new();
@@ -614,12 +639,204 @@ impl VolumeController {
             }
         }
     }
+
+    /// Single connected receiver: play without a calibration profile.
+    ///
+    /// The receiver is owned by the bypass in the registry, so this path only
+    /// mirrors the device volume into the profile-independent state. A failed
+    /// or unconfirmed volume command reports a message but never blocks
+    /// playback and never leaves state behind that a later group decision would
+    /// read as a reason to stay silent.
+    fn tick_single(
+        &self,
+        state: &mut MutexGuard<'_, State>,
+        registry: &ReceiverRegistry,
+        receiver: &ReceiverSnapshot,
+    ) {
+        registry.settle_direct();
+        let id = receiver.id;
+        state.pending.retain(|pending_id, _| *pending_id == id);
+        state.blocked.clear();
+        let pending = state
+            .pending
+            .get(&id)
+            .map(|pending| (pending.request, pending.index, pending.at));
+        if let Some((request, index, at)) = pending {
+            if let Some(reply) = registry.take_reply(id, request) {
+                if reply.failed || reply.volume != index {
+                    state.message = format!("{} 无法应用音量，请检查系统限制", reply.name);
+                }
+                state.pending.remove(&id);
+            } else if at.elapsed() >= Duration::from_secs(4) {
+                state.message = "音量指令未收到确认，请检查连接".into();
+                state.pending.remove(&id);
+            }
+        }
+        state.master_seen = receiver.device.as_ref().map(|device| (id, device.volume));
+        // Earlier group approvals belonged to the multi-receiver profile path.
+        registry.deny_all();
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn sole_receiver_plays_without_a_calibration_profile() {
+        let registry = ReceiverRegistry::default();
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let receiver = registry.register("127.0.0.1:1001".parse().unwrap(), tx);
+        let controller = VolumeController {
+            state: Arc::new(Mutex::new(State::new(Library::default(), String::new()))),
+            path: PathBuf::new(),
+            worker: Arc::new(Mutex::new(None)),
+        };
+        registry.update_device(
+            receiver.id(),
+            DeviceStatus {
+                request_id: 0,
+                device_id: "solo".into(),
+                name: "Solo".into(),
+                volume: 3,
+                minimum: 0,
+                maximum: 15,
+                fixed: false,
+                speaker: true,
+                failed: false,
+            },
+        );
+        controller.tick(&registry);
+        assert!(
+            registry
+                .playback_gate(receiver.id())
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+    }
+
+    #[test]
+    fn a_failed_volume_receipt_does_not_stop_the_sole_receiver() {
+        let registry = ReceiverRegistry::default();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let receiver = registry.register("127.0.0.1:1001".parse().unwrap(), tx);
+        let controller = VolumeController {
+            state: Arc::new(Mutex::new(State::new(Library::default(), String::new()))),
+            path: PathBuf::new(),
+            worker: Arc::new(Mutex::new(None)),
+        };
+        let mut device = DeviceStatus {
+            request_id: 0,
+            device_id: "solo".into(),
+            name: "Solo".into(),
+            volume: 3,
+            minimum: 0,
+            maximum: 15,
+            fixed: false,
+            speaker: true,
+            failed: false,
+        };
+        registry.update_device(receiver.id(), device.clone());
+        controller.set_volume(&registry, 7).unwrap();
+        let ControlMessage::SetVolume { request_id, .. } = rx.try_recv().unwrap() else {
+            panic!("expected volume request")
+        };
+        device.request_id = request_id;
+        device.failed = true;
+        registry.update_device(receiver.id(), device);
+        controller.tick(&registry);
+        assert!(
+            registry
+                .playback_gate(receiver.id())
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+        assert!(controller.state.lock().unwrap().blocked.is_empty());
+    }
+
+    #[test]
+    fn the_last_receiver_keeps_playing_when_the_other_leaves() {
+        let registry = ReceiverRegistry::default();
+        let (first_tx, _first_rx) = tokio::sync::mpsc::channel(16);
+        let (second_tx, _second_rx) = tokio::sync::mpsc::channel(16);
+        let first = registry.register("127.0.0.1:1001".parse().unwrap(), first_tx);
+        let device = DeviceStatus {
+            request_id: 0,
+            device_id: "solo".into(),
+            name: "Solo".into(),
+            volume: 3,
+            minimum: 0,
+            maximum: 15,
+            fixed: false,
+            speaker: true,
+            failed: false,
+        };
+        registry.update_device(first.id(), device.clone());
+        let second = registry.register("127.0.0.1:1002".parse().unwrap(), second_tx);
+        registry.update_device(second.id(), device);
+        registry.deny_all();
+        drop(second);
+        assert!(
+            registry
+                .playback_gate(first.id())
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+    }
+
+    #[test]
+    fn a_second_receiver_does_not_interrupt_the_first() {
+        let registry = ReceiverRegistry::default();
+        let (first_tx, _first_rx) = tokio::sync::mpsc::channel(16);
+        let (second_tx, _second_rx) = tokio::sync::mpsc::channel(16);
+        let first = registry.register("127.0.0.1:1001".parse().unwrap(), first_tx);
+        let device = DeviceStatus {
+            request_id: 0,
+            device_id: "solo".into(),
+            name: "Solo".into(),
+            volume: 3,
+            minimum: 0,
+            maximum: 15,
+            fixed: false,
+            speaker: true,
+            failed: false,
+        };
+        registry.update_device(first.id(), device);
+        assert!(
+            registry
+                .playback_gate(first.id())
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+        let _second = registry.register("127.0.0.1:1002".parse().unwrap(), second_tx);
+        assert!(
+            registry
+                .playback_gate(first.id())
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+    }
+
+    #[test]
+    fn a_failed_device_does_not_get_the_bypass() {
+        let registry = ReceiverRegistry::default();
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let receiver = registry.register("127.0.0.1:1001".parse().unwrap(), tx);
+        registry.update_device(
+            receiver.id(),
+            DeviceStatus {
+                request_id: 0,
+                device_id: "solo".into(),
+                name: "Solo".into(),
+                volume: 3,
+                minimum: 0,
+                maximum: 15,
+                fixed: false,
+                speaker: true,
+                failed: true,
+            },
+        );
+        assert!(
+            !registry
+                .playback_gate(receiver.id())
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+    }
     #[test]
     fn panel_barrier_discards_delayed_old_event_but_accepts_new_physical_change() {
         let registry = ReceiverRegistry::default();
@@ -651,6 +868,10 @@ mod tests {
             path: PathBuf::new(),
             worker: Arc::new(Mutex::new(None)),
         };
+        // The panel profile path only applies once more than one receiver is
+        // connected; a second registered receiver keeps this a group decision.
+        let (idle_tx, _idle_rx) = tokio::sync::mpsc::channel(16);
+        let _idle = registry.register("127.0.0.1:1009".parse().unwrap(), idle_tx);
         registry.update_device(master.id(), device.clone());
         controller.tick(&registry);
         controller.set_volume(&registry, 7).unwrap();
@@ -728,6 +949,8 @@ mod tests {
             path: PathBuf::new(),
             worker: Arc::new(Mutex::new(None)),
         };
+        let (idle_tx, _idle_rx) = tokio::sync::mpsc::channel(16);
+        let _idle = registry.register("127.0.0.1:1009".parse().unwrap(), idle_tx);
         registry.update_device(master.id(), device.clone());
         controller.tick(&registry);
         controller.set_volume(&registry, 7).unwrap();
@@ -829,6 +1052,8 @@ mod tests {
             path: path.clone(),
             worker: Arc::new(Mutex::new(None)),
         };
+        let (idle_tx, _idle_rx) = tokio::sync::mpsc::channel(16);
+        let _idle = registry.register("127.0.0.1:1009".parse().unwrap(), idle_tx);
         registry.update_device(master.id(), device.clone());
         controller.tick(&registry);
         controller.set_volume(&registry, 7).unwrap();
@@ -996,6 +1221,8 @@ mod tests {
             path: path.clone(),
             worker: Arc::new(Mutex::new(None)),
         };
+        let (idle_tx, _idle_rx) = tokio::sync::mpsc::channel(16);
+        let _idle = registry.register("127.0.0.1:1009".parse().unwrap(), idle_tx);
         registry.update_device(master.id(), device.clone());
         registry.approve(&[(master.id(), device)]);
         assert!(

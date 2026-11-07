@@ -23,13 +23,14 @@ use windows::{
 };
 
 use super::model::{Command, Page};
-use crate::audio::transmission::AudioTransmissionGate;
+use crate::{application::registry::ReceiverRegistry, audio::transmission::AudioTransmissionGate};
 
 const CALLBACK: u32 = WM_APP + 1;
 
 struct State {
     sender: SyncSender<Command>,
     transmission: AudioTransmissionGate,
+    registry: ReceiverRegistry,
     taskbar_created: u32,
 }
 
@@ -42,7 +43,11 @@ pub(super) struct Tray {
 }
 
 impl Tray {
-    pub fn new(sender: SyncSender<Command>, transmission: AudioTransmissionGate) -> Result<Self> {
+    pub fn new(
+        sender: SyncSender<Command>,
+        transmission: AudioTransmissionGate,
+        registry: ReceiverRegistry,
+    ) -> Result<Self> {
         let instance: HINSTANCE = unsafe { GetModuleHandleW(None) }?.into();
         let class = WNDCLASSW {
             lpfnWndProc: Some(window_proc),
@@ -73,6 +78,7 @@ impl Tray {
             *state.borrow_mut() = Some(State {
                 sender,
                 transmission,
+                registry,
                 taskbar_created: unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) },
             })
         });
@@ -132,11 +138,21 @@ fn send(command: Command) {
 }
 
 fn menu(hwnd: HWND) -> Result<()> {
-    let enabled = STATE.with(|s| {
-        s.borrow()
-            .as_ref()
-            .is_some_and(|s| s.transmission.is_enabled())
+    let (enabled, single) = STATE.with(|s| {
+        s.borrow().as_ref().map_or((false, false), |s| {
+            (
+                s.transmission.is_enabled(),
+                s.registry.snapshots().len() == 1,
+            )
+        })
     });
+    let step_label = if single {
+        "设备音量"
+    } else {
+        "主设备音量"
+    };
+    let raise = format!("调高{step_label}");
+    let lower = format!("调低{step_label}");
     let menu = unsafe { CreatePopupMenu() }?;
     let result = (|| -> Result<()> {
         for (id, label) in [
@@ -149,8 +165,8 @@ fn menu(hwnd: HWND) -> Result<()> {
                     "启用音频"
                 },
             ),
-            (3, "调高主设备音量"),
-            (4, "调低主设备音量"),
+            (3, raise.as_str()),
+            (4, lower.as_str()),
             (5, "显示主窗口"),
             (6, "服务信息"),
             (7, "设置"),

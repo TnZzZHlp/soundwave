@@ -17,7 +17,7 @@ pub(crate) fn run(model: crate::application::state::ServerState) -> anyhow::Resu
     let shutdown = model.shutdown.clone();
     let volume = model.volume.clone();
     let (sender, receiver) = mpsc::sync_channel(16);
-    let tray = tray::Tray::new(sender, model.transmission.clone())?;
+    let tray = tray::Tray::new(sender, model.transmission.clone(), model.registry.clone())?;
     let failure = Rc::new(RefCell::new(None));
     let startup_failure = failure.clone();
     Application::new().run(move |cx| {

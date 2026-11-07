@@ -205,6 +205,7 @@ impl Dashboard {
             .collect::<Vec<_>>();
         let available = profile.map_or_else(Vec::new, |p| p.available(&p.participating(&devices)));
         let busy = view.editing || c.server.calibration.status().0;
+        let single = c.receivers.len() == 1;
         let mut panel = self
             .panel()
             .flex_1()
@@ -233,7 +234,7 @@ impl Dashboard {
             );
         }
         panel = panel.child(profiles);
-        if profile.is_none() {
+        if profile.is_none() && !single {
             panel = panel.child("请打开校准窗口，指定主设备并保存音量对应关系。");
         }
         for receiver in &c.receivers {
@@ -245,16 +246,23 @@ impl Dashboard {
             let master_ready = profile.is_some_and(|p| p.master.matches(device));
             let follower =
                 profile.and_then(|p| p.followers.iter().find(|f| f.device.id == device.device_id));
-            let role = if master {
+            let direct = single && receiver.direct;
+            let role = if direct {
+                "单设备直通"
+            } else if single {
+                "设备不可用"
+            } else if master {
                 "主设备"
             } else if follower.is_some_and(|f| !f.mapping.is_empty() && f.device.matches(device)) {
                 "从设备"
             } else if follower.is_some() {
                 "从设备，未校准或当前不可用"
             } else {
-                "未校准，不参与播放"
+                "未校准，等待校准配置"
             };
-            let value = if master {
+            let value = if direct {
+                device.volume
+            } else if master {
                 profile.map_or(device.volume, |p| p.volume)
             } else {
                 device.volume
@@ -269,12 +277,12 @@ impl Dashboard {
                 ))
                 .child(self.slider(
                     ("device-volume", receiver.id),
-                    if master {
+                    if master && !direct {
                         SliderKind::MasterPosition
                     } else {
                         SliderKind::Device(receiver.id)
                     },
-                    if master {
+                    if master && !direct {
                         available
                             .iter()
                             .position(|index| *index == value)
@@ -282,12 +290,16 @@ impl Dashboard {
                     } else {
                         value
                     },
-                    if master {
+                    if master && !direct {
                         (0, available.len().saturating_sub(1) as u16)
                     } else {
                         (device.minimum, device.maximum)
                     },
-                    master_ready && !busy && !available.is_empty(),
+                    if direct {
+                        !device.fixed && !device.failed
+                    } else {
+                        master_ready && !busy && !available.is_empty()
+                    },
                     cx,
                 ));
             panel = panel.child(row);
@@ -296,25 +308,35 @@ impl Dashboard {
             panel = panel.child("等待 Android 设备连接");
         }
         if let Some(profile) = profile {
-            if !c
-                .receivers
-                .iter()
-                .any(|r| r.device.as_ref().is_some_and(|d| profile.master.matches(d)))
+            if !single
+                && !c
+                    .receivers
+                    .iter()
+                    .any(|r| r.device.as_ref().is_some_and(|d| profile.master.matches(d)))
             {
                 panel = panel.child(format!("主设备 {} 未就绪，整组暂停", profile.master.name));
             }
-            let available = available
-                .iter()
-                .map(u16::to_string)
-                .collect::<Vec<_>>()
-                .join(", ");
-            panel = panel.child(div().text_color(self.colors.muted).child(
-                if available.is_empty() {
-                    "无共同校准档位，整组暂停".to_owned()
-                } else {
-                    format!("主设备可用档位：{available}")
-                },
-            ));
+            if !single {
+                let available = available
+                    .iter()
+                    .map(u16::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                panel = panel.child(div().text_color(self.colors.muted).child(
+                    if available.is_empty() {
+                        "无共同校准档位，整组暂停".to_owned()
+                    } else {
+                        format!("主设备可用档位：{available}")
+                    },
+                ));
+            }
+        }
+        if single {
+            panel = panel.child(
+                div()
+                    .text_color(self.colors.muted)
+                    .child("单设备连接时直接播放，按手机系统媒体音量输出。"),
+            );
         }
         panel.child(
             div()
@@ -395,10 +417,8 @@ impl Render for Dashboard {
         } else if c.receivers.is_empty() {
             "等待连接".into()
         } else {
-            format!(
-                "正在向 {} 台设备传输",
-                c.receivers.iter().filter(|r| r.playing).count()
-            )
+            let playing = c.receivers.iter().filter(|r| r.playing).count();
+            format!("{} 台已连接，{playing} 台正在播放", c.receivers.len())
         };
         let content = match c.page {
             Page::Receivers => self.receivers(cx),

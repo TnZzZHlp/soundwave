@@ -219,17 +219,13 @@ impl Controller {
                     .set_enabled(!self.server.transmission.is_enabled());
             }
             Command::OpenCalibration => {
-                self.server
-                    .volume
-                    .open(&self.server.registry, &self.server.transmission)?;
+                self.server.volume.open(&self.server.registry)?;
                 self.point = self.view().draft.as_ref().map_or(0, |p| p.volume);
                 self.notice.clear();
             }
             Command::CloseCalibration => {
                 ensure!(self.settled(), "请等待音量设置确认后关闭窗口");
-                self.server
-                    .volume
-                    .close(&self.server.registry, &self.server.transmission);
+                self.server.volume.close(&self.server.registry);
                 self.sessions.clear();
                 self.notice.clear();
             }
@@ -270,6 +266,13 @@ impl Controller {
                     }
                     self.pending.insert(id, (index, Instant::now()));
                 } else {
+                    if self.receivers.len() == 1 {
+                        self.server
+                            .volume
+                            .set_volume(&self.server.registry, index)?;
+                        self.notice.clear();
+                        return Ok(());
+                    }
                     let profile = view.library.current().context("请先保存主从校准配置")?;
                     ensure!(
                         self.receivers.iter().any(|r| r.id == id
@@ -283,6 +286,15 @@ impl Controller {
                 self.notice.clear();
             }
             Command::MasterPosition(position) => {
+                if self.receivers.len() == 1 {
+                    let device = self.receivers[0].device.clone().context("设备尚未就绪")?;
+                    let index = device.minimum.saturating_add(position).min(device.maximum);
+                    self.server
+                        .volume
+                        .set_volume(&self.server.registry, index)?;
+                    self.notice.clear();
+                    return Ok(());
+                }
                 let view = self.view();
                 let profile = view.library.current().context("请先应用校准配置")?;
                 let devices = self
@@ -433,12 +445,15 @@ impl Controller {
                     },
                 );
                 self.sessions.clear();
-                self.server.calibration.start(CalibrationRequest {
-                    reference,
-                    profile,
-                    registry: self.server.registry.clone(),
-                    shutdown: self.server.shutdown.clone(),
-                })?;
+                self.server.calibration.start(
+                    CalibrationRequest {
+                        reference,
+                        profile,
+                        registry: self.server.registry.clone(),
+                        shutdown: self.server.shutdown.clone(),
+                    },
+                    &self.server.transmission,
+                )?;
                 self.notice.clear();
             }
             Command::Profile(id) => {
@@ -469,6 +484,18 @@ impl Controller {
                 }
             }
             Command::AdjustAll(steps) => {
+                if self.receivers.len() == 1 {
+                    let device = self.receivers[0].device.clone().context("设备尚未就绪")?;
+                    ensure!(!device.fixed && !device.failed, "设备无法调整扬声器音量");
+                    let index = i32::from(device.volume) + i32::from(steps);
+                    let index =
+                        index.clamp(i32::from(device.minimum), i32::from(device.maximum)) as u16;
+                    self.server
+                        .volume
+                        .set_volume(&self.server.registry, index)?;
+                    self.notice.clear();
+                    return Ok(());
+                }
                 let profile = self
                     .view()
                     .library

@@ -18,6 +18,8 @@ pub struct ReceiverSnapshot {
     pub peer: SocketAddr,
     pub device: Option<DeviceStatus>,
     pub playing: bool,
+    /// Playing under the single-device bypass rather than a calibration profile.
+    pub direct: bool,
 }
 
 /// Receiver count above which consumer Wi-Fi airtime is likely to degrade.
@@ -47,6 +49,10 @@ struct Receiver {
     replies: BTreeMap<u32, DeviceStatus>,
     tone_replies: BTreeMap<u32, (bool, bool)>,
     playback: Arc<AtomicBool>,
+    /// Sticky bypass granted while this receiver was the only one connected.
+    direct: bool,
+    /// Last calibration-profile verdict for this receiver.
+    approved: bool,
     unsolicited_volume: Option<u16>,
     observed_volume: Option<u16>,
     volume_requests: BTreeSet<u32>,
@@ -80,6 +86,8 @@ impl ReceiverRegistry {
                     replies: BTreeMap::new(),
                     tone_replies: BTreeMap::new(),
                     playback: Arc::new(AtomicBool::new(false)),
+                    direct: false,
+                    approved: false,
                     unsolicited_volume: None,
                     observed_volume: None,
                     volume_requests: BTreeSet::new(),
@@ -141,6 +149,7 @@ impl ReceiverRegistry {
                 peer: r.peer,
                 device: r.device.clone(),
                 playing: r.playback.load(Ordering::Acquire),
+                direct: r.direct,
             })
             .collect()
     }
@@ -153,14 +162,19 @@ impl ReceiverRegistry {
             .unwrap_or_default()
     }
 
+    /// Withdraws every calibration-profile verdict. A receiver holding the
+    /// single-device bypass keeps playing, so an open calibration window, a
+    /// missing profile or an unconfirmed volume never silences the only phone.
     pub fn deny_all(&self) {
-        for receiver in self.lock().receivers.values() {
-            receiver.playback.store(false, Ordering::Release);
+        let mut state = self.lock();
+        for receiver in state.receivers.values_mut() {
+            receiver.approved = false;
+            publish(receiver);
         }
     }
 
     pub fn approve(&self, expected: &[(u64, DeviceStatus)]) {
-        let state = self.lock();
+        let mut state = self.lock();
         let ready = expected.iter().all(|(id, expected)| {
             state
                 .receivers
@@ -176,12 +190,17 @@ impl ReceiverRegistry {
                         && !actual.failed
                 })
         });
-        for (id, receiver) in &state.receivers {
-            receiver.playback.store(
-                ready && expected.iter().any(|(approved, _)| approved == id),
-                Ordering::Release,
-            );
+        for (id, receiver) in state.receivers.iter_mut() {
+            receiver.approved = ready && expected.iter().any(|(approved, _)| approved == id);
+            publish(receiver);
         }
+    }
+
+    /// Grants the bypass to the sole connected receiver once it has reported a
+    /// usable device status, then republishes every gate. A grant is sticky:
+    /// a second phone joining later does not interrupt the first one.
+    pub fn settle_direct(&self) {
+        settle(&mut self.lock());
     }
 
     pub fn send(&self, id: u64, message: ControlMessage) -> anyhow::Result<()> {
@@ -374,8 +393,15 @@ impl ReceiverRegistry {
                     || old.failed != status.failed
                     || old.fixed != status.fixed
             }) {
-                receiver.playback.store(false, Ordering::Release);
+                receiver.approved = false;
+                // A failed volume receipt is a command failure, not a broken
+                // device, so it must not revoke the sole-receiver bypass. Only
+                // a status that no longer identifies a device does that.
+                if status.device_id.is_empty() {
+                    receiver.direct = false;
+                }
             }
+            publish(receiver);
             receiver.device = Some(status.clone());
             if status.request_id != 0 {
                 if receiver.replies.len() >= 32
@@ -386,6 +412,8 @@ impl ReceiverRegistry {
                 receiver.replies.insert(status.request_id, status);
             }
         }
+        // A sole receiver may become eligible only once its status arrives.
+        settle(&mut state);
     }
 
     fn remove(&self, id: u64) {
@@ -393,9 +421,12 @@ impl ReceiverRegistry {
             let mut state = self.lock();
             let removed = state.receivers.remove(&id);
             if removed.is_some() {
-                for receiver in state.receivers.values() {
-                    receiver.playback.store(false, Ordering::Release);
+                for receiver in state.receivers.values_mut() {
+                    receiver.approved = false;
                 }
+                // settle() republishes every gate, granting the surviving sole
+                // receiver its bypass before any false verdict becomes visible.
+                settle(&mut state);
             }
             if state.receivers.len() <= AIRTIME_WARNING_RECEIVERS {
                 state.airtime_warned = false;
@@ -415,6 +446,40 @@ impl ReceiverRegistry {
 impl ReceiverGuard {
     pub fn id(&self) -> u64 {
         self.id
+    }
+}
+
+/// Publishes the effective playback verdict for one receiver. The calibration
+/// profile and the single-device bypass are independent grants; either one is
+/// enough to send PCM.
+fn publish(receiver: &mut Receiver) {
+    receiver
+        .playback
+        .store(receiver.direct || receiver.approved, Ordering::Release);
+}
+
+/// Applies the single-device bypass and republishes every gate.
+///
+/// The bypass is granted when exactly one receiver is connected and that
+/// receiver has reported a status it can be identified by. Nothing revokes an
+/// existing grant here: a second phone joining mutates no grant, so the first
+/// one keeps playing, and a later return to one connected receiver therefore
+/// already holds it.
+fn settle(state: &mut RegistryState) {
+    if state.receivers.len() == 1 {
+        for receiver in state.receivers.values_mut() {
+            if !receiver.direct
+                && receiver
+                    .device
+                    .as_ref()
+                    .is_some_and(|device| !device.failed && !device.device_id.is_empty())
+            {
+                receiver.direct = true;
+            }
+        }
+    }
+    for receiver in state.receivers.values_mut() {
+        publish(receiver);
     }
 }
 

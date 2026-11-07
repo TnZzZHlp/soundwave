@@ -10,7 +10,10 @@ use tokio_util::sync::CancellationToken;
 
 use super::registry::ReceiverRegistry;
 use crate::{
-    audio::microphone::{Measurement, Microphone},
+    audio::{
+        microphone::{Measurement, Microphone},
+        transmission::AudioTransmissionGate,
+    },
     loudness::{closest_step, signal_level},
     volume_profiles::Profile,
 };
@@ -62,7 +65,7 @@ impl CalibrationController {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).message = text.into();
     }
 
-    pub fn start(&self, request: CalibrationRequest) -> Result<()> {
+    pub fn start(&self, request: CalibrationRequest, gate: &AudioTransmissionGate) -> Result<()> {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         ensure!(!state.running, "校准已在进行中");
         let cancel = request.shutdown.child_token();
@@ -71,9 +74,21 @@ impl CalibrationController {
         state.result = None;
         state.message = "正在准备校准…".into();
         let controller = self.clone();
+        // Measurement needs a quiet room, so PCM stops here and resumes when the
+        // measurement thread finishes or is cancelled.
+        gate.set_calibrating(true);
+        let gate = gate.clone();
+        let worker_gate = gate.clone();
         if let Err(error) = thread::Builder::new()
             .name("soundwave-calibration".into())
             .spawn(move || {
+                // Clears the pause and the running flag even if the measurement
+                // thread panics, so a failed measurement cannot silence the
+                // server permanently.
+                let _guard = WorkerGuard {
+                    controller: controller.clone(),
+                    gate: worker_gate,
+                };
                 let result = run(&controller, request, &cancel);
                 let mut state = controller.state.lock().unwrap_or_else(|e| e.into_inner());
                 match result {
@@ -86,13 +101,30 @@ impl CalibrationController {
                     }
                     Err(error) => state.message = format!("{error:#}"),
                 }
-                state.running = false;
             })
         {
+            gate.set_calibrating(false);
             state.running = false;
             return Err(error.into());
         }
         Ok(())
+    }
+}
+
+/// Releases the measurement pause when the calibration thread exits.
+struct WorkerGuard {
+    controller: CalibrationController,
+    gate: AudioTransmissionGate,
+}
+
+impl Drop for WorkerGuard {
+    fn drop(&mut self) {
+        self.gate.set_calibrating(false);
+        self.controller
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .running = false;
     }
 }
 
