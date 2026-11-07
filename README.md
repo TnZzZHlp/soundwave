@@ -234,7 +234,8 @@ Allow inbound **UDP 48400** for `audio-stream-server.exe`. QUIC uses UDP; openin
 | QR scan cannot start | Grant camera permission to the app and make sure no other app is holding the camera, or enter the host, port, and fingerprint manually. |
 | Certificate error | Copy the current server fingerprint exactly. Delete neither the server identity directory nor the app’s saved pairing unintentionally. |
 | No sound | Run `--capture-to capture.pcm` and inspect the raw file. Verify Windows is playing through its default output device. |
-| Immediate disconnect | Confirm the Android app and server are both v0.2 (see [Upgrading](#upgrading)) and that the phone can reach the entered IP address. |
+| One phone connected but silent | Check the dashboard device row for a role label. A phone that connected but never reported a device status cannot be granted playback; reconnecting it usually fixes this. |
+| Immediate disconnect | Confirm the Android app and server agree on the protocol version (see [Upgrading](#upgrading)) and that the phone can reach the entered IP address. |
 | Repeating underruns or clicks | The client automatically increases its jitter target after underruns or late packets. If problems continue at the 100 ms cap, use a stronger Wi-Fi signal, disable power-saving restrictions, and avoid congested 2.4 GHz networks. |
 | High latency | Check the displayed buffer/loss counters. Persistent packet loss or ring overflow means the network/output cannot sustain the stream. |
 | One phone stutters while others are fine | Expected: each receiver has its own QUIC congestion control and drops only its own audio. Improve that phone's Wi-Fi signal or reduce interference. |
@@ -243,9 +244,11 @@ Allow inbound **UDP 48400** for `audio-stream-server.exe`. QUIC uses UDP; openin
 
 ## Upgrading
 
-The current protocol version is 6. A server and app that disagree on it refuse the handshake, so upgrade both together: a v0.2 app cannot stream from a v0.1 server, and a v0.1 app cannot stream from a v0.2 server.
+The current protocol version is 8. A server and app that disagree on it refuse the handshake, so upgrade both together: a v0.2 app cannot stream from a v0.1 server, and a v0.1 app cannot stream from a v0.2 server.
 
-Version 0.2 added multi-receiver streaming and idle-stream pausing, which raised `PROTOCOL_VERSION` from 5 to 6 for the `AudioIdle` control message. The Windows TLS identity in `%LOCALAPPDATA%\Soundwave` is unchanged by an upgrade, so the pairing QR code and the fingerprint already stored on each phone keep working.
+Version 0.2 added multi-receiver streaming and idle-stream pausing, which raised `PROTOCOL_VERSION` from 5 to 6 for the `AudioIdle` control message; per-device volume control and microphone-assisted calibration then raised it to 8. The Windows TLS identity in `%LOCALAPPDATA%\Soundwave` is unchanged by an upgrade, so the pairing QR code and the fingerprint already stored on each phone keep working.
+
+Version 0.3 changed no wire format: single-device playback is a server-side decision, so a v0.2 app keeps working against a v0.3 server and the protocol version stays 8.
 
 ## Current V0.2 boundaries
 

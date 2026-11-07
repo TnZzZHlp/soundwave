@@ -431,7 +431,7 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
 name = "audio-stream-android"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "arc-swap",
  "audio-stream-protocol",
@@ -446,7 +446,7 @@ dependencies = [
 
 [[package]]
 name = "audio-stream-protocol"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "bytes",
  "postcard",
@@ -456,7 +456,7 @@ dependencies = [
 
 [[package]]
 name = "audio-stream-server"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "audio-stream-protocol",
@@ -481,7 +481,7 @@ dependencies = [
 
 [[package]]
 name = "audio-stream-transport"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "audio-stream-protocol",
  "bytes",
